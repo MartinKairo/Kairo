@@ -3,7 +3,7 @@
 // 2. recalculer son score de momentum global avec la formule de lib/scoring/config.js
 // 3. enregistrer le résultat dans Supabase
 //
-// Les signaux funding / hiring / press restent fictifs pour l'instant (prochaines étapes).
+// Les signaux funding / trends / press restent fictifs pour l'instant (prochaines étapes).
 
 import { supabase } from "@/lib/supabaseClient";
 import { getGithubScore } from "@/lib/scoring/sources/github";
@@ -32,7 +32,7 @@ export async function GET() {
 
     const newScore = computeMomentumScore({
       funding: startup.signal_funding,
-      hiring: startup.signal_hiring,
+      trends: startup.signal_trends,
       press: startup.signal_press,
       github: signalGithub,
     });

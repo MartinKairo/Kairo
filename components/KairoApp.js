@@ -503,7 +503,7 @@ export default function KairoApp({ startups }) {
             </div>
             {[
               { l: "Levées / funding (40%)", v: selected.signal_funding },
-              { l: "Recrutement (20%)", v: selected.signal_hiring },
+              { l: "Tendance de recherche (20%)", v: selected.signal_trends },
               { l: "Mentions presse (20%)", v: selected.signal_press },
               ...(selected.signal_github !== null && selected.signal_github !== undefined
                 ? [{ l: "Activité GitHub (bonus, +20 pts max)", v: selected.signal_github, icon: true }]
