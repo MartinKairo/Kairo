@@ -502,10 +502,12 @@ export default function KairoApp({ startups }) {
               Composition du score
             </div>
             {[
-              { l: "Levées / funding (35%)", v: selected.signal_funding },
-              { l: "Activité GitHub (25%)", v: selected.signal_github, icon: true },
-              { l: "Tendance de recherche (25%)", v: selected.signal_trends },
-              { l: "Mentions presse (15%)", v: selected.signal_press },
+              { l: "Levées / funding (40%)", v: selected.signal_funding },
+              { l: "Recrutement (20%)", v: selected.signal_hiring },
+              { l: "Mentions presse (20%)", v: selected.signal_press },
+              ...(selected.signal_github !== null && selected.signal_github !== undefined
+                ? [{ l: "Activité GitHub (bonus, +20 pts max)", v: selected.signal_github, icon: true }]
+                : []),
             ].map((row, i) => (
               <div key={i} style={{ marginBottom: 10 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>

@@ -1,9 +1,9 @@
 // Route déclenchée manuellement (visite cette URL dans le navigateur) pour :
-// 1. récupérer le vrai signal GitHub de chaque startup
+// 1. récupérer le signal GitHub (bonus sectoriel) de chaque startup, s'il est applicable
 // 2. recalculer son score de momentum global avec la formule de lib/scoring/config.js
 // 3. enregistrer le résultat dans Supabase
 //
-// Les signaux funding / trends / press restent fictifs pour l'instant (prochaines étapes).
+// Les signaux funding / hiring / press restent fictifs pour l'instant (prochaines étapes).
 
 import { supabase } from "@/lib/supabaseClient";
 import { getGithubScore } from "@/lib/scoring/sources/github";
@@ -19,13 +19,22 @@ export async function GET() {
   const results = [];
 
   for (const startup of startups) {
-    const signalGithub = await getGithubScore(startup.github_org);
+    const github = await getGithubScore(startup.github_org);
+
+    // "error" -> on garde la dernière valeur connue plutôt que de conclure à tort
+    // que le signal est absent. false -> vraiment non applicable (NULL en base).
+    const signalGithub =
+      github.applicable === true
+        ? github.score
+        : github.applicable === "error"
+          ? startup.signal_github
+          : null;
 
     const newScore = computeMomentumScore({
       funding: startup.signal_funding,
-      github: signalGithub,
-      trends: startup.signal_trends,
+      hiring: startup.signal_hiring,
       press: startup.signal_press,
+      github: signalGithub,
     });
 
     const delta = Math.round((newScore - startup.score) * 10) / 10;
