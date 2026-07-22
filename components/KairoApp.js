@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useMemo, useEffect, useRef } from "react";
+import { SHARE_PRICE_MULTIPLIER, STARTING_CASH } from "@/lib/market";
+import AuthBox from "@/components/AuthBox";
 
 const Icon = ({ path, size = 14, color = "currentColor", ...props }) => (
   <svg
@@ -91,9 +93,6 @@ const Wallet = (p) => (
   />
 );
 
-const STARTING_CASH = 10000;
-const SHARE_PRICE_MULTIPLIER = 10;
-
 function useCountUp(target, duration = 600) {
   const [val, setVal] = useState(target);
   useEffect(() => {
@@ -149,8 +148,22 @@ function StartupLogo({ startup, size = 40 }) {
   );
 }
 
-export default function KairoApp({ startups }) {
-  const [holdings, setHoldings] = useState({});
+export default function KairoApp({ startups, initialCash, initialHoldings, userEmail }) {
+  // Portefeuille persistant en base, propre à chaque utilisateur (comptes
+  // Supabase Auth par lien magique, table portfolio + holdings avec RLS, voir
+  // supabase/006_user_accounts.sql) — initialisé depuis les props chargées
+  // côté serveur (app/page.js), puis tenu à jour par les réponses de l'API
+  // /api/trade (qui fait foi : le cash et les parts ne sont jamais dérivés
+  // localement, contrairement à l'ancienne version 100% côté client).
+  //
+  // Pas connecté -> initialCash vaut null (voir app/page.js) : on affiche le
+  // marché en lecture seule avec une invite de connexion (AuthBox) à la
+  // place du solde, plutôt qu'un faux solde qui ne serait jamais sauvegardé.
+  const isLoggedIn = Boolean(userEmail);
+  const [holdings, setHoldings] = useState(initialHoldings || {});
+  const [cash, setCash] = useState(initialCash);
+  const [pendingId, setPendingId] = useState(null); // id de la startup en cours d'achat/vente
+  const [tradeError, setTradeError] = useState(null);
   const [selected, setSelected] = useState(startups[0]);
   const [tab, setTab] = useState("marche");
   const [query, setQuery] = useState("");
@@ -169,25 +182,44 @@ export default function KairoApp({ startups }) {
     }, 0);
   }, [holdings, startups]);
 
-  const cash = STARTING_CASH - portfolioValue;
-  const totalWealth = cash + portfolioValue;
+  const totalWealth = cash === null ? 0 : cash + portfolioValue;
   const animatedWealth = useCountUp(totalWealth);
-  const pnl = totalWealth - STARTING_CASH;
+  const pnl = cash === null ? 0 : totalWealth - STARTING_CASH;
 
-  const buy = (id) => {
-    const s = startups.find((s) => s.id === id);
-    if (cash < s.score * SHARE_PRICE_MULTIPLIER) return;
-    setHoldings((h) => ({ ...h, [id]: (h[id] || 0) + 1 }));
+  // Achat/vente d'UNE part, persisté en base via /api/trade (le prix est
+  // recalculé et validé côté serveur — voir app/api/trade/route.js). En cas
+  // d'erreur (capital insuffisant, rien à vendre, etc.), rien n'est modifié
+  // localement et le message renvoyé par l'API est affiché.
+  const trade = async (id, action) => {
+    setTradeError(null);
+    setPendingId(id);
+    try {
+      const res = await fetch("/api/trade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startupId: id, action }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setTradeError(data.error || "Erreur lors de la transaction");
+        return;
+      }
+      setCash(data.cash);
+      setHoldings((h) => {
+        const next = { ...h };
+        if (data.shares > 0) next[id] = data.shares;
+        else delete next[id];
+        return next;
+      });
+    } catch {
+      setTradeError("Erreur réseau, réessaie");
+    } finally {
+      setPendingId(null);
+    }
   };
-  const sell = (id) => {
-    setHoldings((h) => {
-      const next = { ...h };
-      if (!next[id]) return h;
-      next[id] -= 1;
-      if (next[id] <= 0) delete next[id];
-      return next;
-    });
-  };
+
+  const buy = (id) => trade(id, "buy");
+  const sell = (id) => trade(id, "sell");
 
   return (
     <div style={{ minHeight: "100vh" }}>
@@ -269,22 +301,25 @@ export default function KairoApp({ startups }) {
               }}
             />
           </div>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              background: "#151922",
-              border: "1px solid #232833",
-              borderRadius: 10,
-              padding: "7px 12px",
-            }}
-          >
-            <Wallet size={14} color="#FFB800" />
-            <span className="kairo-mono" style={{ fontSize: 13, fontWeight: 600 }}>
-              {cash.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} K¢
-            </span>
-          </div>
+          {isLoggedIn && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                background: "#151922",
+                border: "1px solid #232833",
+                borderRadius: 10,
+                padding: "7px 12px",
+              }}
+            >
+              <Wallet size={14} color="#FFB800" />
+              <span className="kairo-mono" style={{ fontSize: 13, fontWeight: 600 }}>
+                {cash.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} K¢
+              </span>
+            </div>
+          )}
+          <AuthBox userEmail={userEmail} />
         </div>
       </div>
 
@@ -303,38 +338,61 @@ export default function KairoApp({ startups }) {
             gap: 20,
           }}
         >
-          <div>
-            <div
-              style={{
-                fontSize: 12,
-                color: "#8A93A6",
-                marginBottom: 8,
-                letterSpacing: "0.04em",
-                textTransform: "uppercase",
-              }}
-            >
-              Valeur totale du portefeuille
+          {isLoggedIn ? (
+            <div>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#8A93A6",
+                  marginBottom: 8,
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
+                }}
+              >
+                Valeur totale du portefeuille
+              </div>
+              <div className="kairo-display" style={{ fontSize: 42, fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1 }}>
+                {animatedWealth.toLocaleString("fr-FR", { maximumFractionDigits: 0 })}{" "}
+                <span style={{ fontSize: 22, color: "#8A93A6" }}>K¢</span>
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  color: pnl >= 0 ? "#3DDC84" : "#FF5C5C",
+                  fontSize: 14,
+                  fontWeight: 600,
+                }}
+              >
+                {pnl >= 0 ? <TrendingUp size={15} /> : <TrendingDown size={15} />}
+                {pnl >= 0 ? "+" : ""}
+                {pnl.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} K¢ depuis le début
+              </div>
             </div>
-            <div className="kairo-display" style={{ fontSize: 42, fontWeight: 700, letterSpacing: "-0.02em", lineHeight: 1 }}>
-              {animatedWealth.toLocaleString("fr-FR", { maximumFractionDigits: 0 })}{" "}
-              <span style={{ fontSize: 22, color: "#8A93A6" }}>K¢</span>
+          ) : (
+            <div>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#8A93A6",
+                  marginBottom: 8,
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
+                }}
+              >
+                Portefeuille fictif
+              </div>
+              <div className="kairo-display" style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em" }}>
+                Connecte-toi pour trader
+              </div>
+              <div style={{ marginTop: 8, fontSize: 13, color: "#8A93A6", maxWidth: 380 }}>
+                Crée un compte gratuit (email + lien magique, en haut à droite) pour recevoir 10&nbsp;000 K¢ fictifs et
+                suivre ton propre portefeuille.
+              </div>
             </div>
-            <div
-              style={{
-                marginTop: 10,
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 5,
-                color: pnl >= 0 ? "#3DDC84" : "#FF5C5C",
-                fontSize: 14,
-                fontWeight: 600,
-              }}
-            >
-              {pnl >= 0 ? <TrendingUp size={15} /> : <TrendingDown size={15} />}
-              {pnl >= 0 ? "+" : ""}
-              {pnl.toLocaleString("fr-FR", { maximumFractionDigits: 0 })} K¢ depuis le début
-            </div>
-          </div>
+          )}
           <div style={{ display: "flex", gap: 28 }}>
             <div>
               <div style={{ fontSize: 11, color: "#8A93A6", marginBottom: 4 }}>STARTUPS SUIVIES</div>
@@ -368,6 +426,22 @@ export default function KairoApp({ startups }) {
             </button>
           ))}
         </div>
+
+        {tradeError && (
+          <div
+            style={{
+              background: "#2A1416",
+              border: "1px solid #4A2226",
+              color: "#FF8A8A",
+              fontSize: 13,
+              borderRadius: 10,
+              padding: "10px 14px",
+              marginBottom: 16,
+            }}
+          >
+            {tradeError}
+          </div>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 24 }}>
           <div>
@@ -418,7 +492,7 @@ export default function KairoApp({ startups }) {
                 <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
                   <button
                     onClick={() => sell(s.id)}
-                    disabled={!holdings[s.id]}
+                    disabled={!isLoggedIn || !holdings[s.id] || pendingId === s.id}
                     style={{
                       width: 28,
                       height: 28,
@@ -426,6 +500,7 @@ export default function KairoApp({ startups }) {
                       border: "1px solid #232833",
                       background: "#151922",
                       color: holdings[s.id] ? "#EDEEF2" : "#3A3F4A",
+                      opacity: pendingId === s.id ? 0.5 : 1,
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
@@ -438,6 +513,7 @@ export default function KairoApp({ startups }) {
                   </span>
                   <button
                     onClick={() => buy(s.id)}
+                    disabled={!isLoggedIn || pendingId === s.id}
                     style={{
                       width: 28,
                       height: 28,
@@ -445,6 +521,7 @@ export default function KairoApp({ startups }) {
                       border: "none",
                       background: "#FFB800",
                       color: "#0B0E14",
+                      opacity: pendingId === s.id ? 0.5 : 1,
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
@@ -552,6 +629,7 @@ export default function KairoApp({ startups }) {
 
             <button
               onClick={() => buy(selected.id)}
+              disabled={!isLoggedIn || pendingId === selected.id}
               style={{
                 width: "100%",
                 marginTop: 4,
@@ -562,9 +640,14 @@ export default function KairoApp({ startups }) {
                 color: "#0B0E14",
                 fontWeight: 700,
                 fontSize: 14,
+                opacity: !isLoggedIn || pendingId === selected.id ? 0.6 : 1,
               }}
             >
-              Acheter 1 part — {(selected.score * SHARE_PRICE_MULTIPLIER).toLocaleString("fr-FR")} K¢
+              {pendingId === selected.id
+                ? "…"
+                : isLoggedIn
+                ? `Acheter 1 part — ${(selected.score * SHARE_PRICE_MULTIPLIER).toLocaleString("fr-FR")} K¢`
+                : "Connecte-toi pour acheter"}
             </button>
           </div>
         </div>

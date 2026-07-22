@@ -2,8 +2,6 @@
 // 1. récupérer le signal GitHub (bonus sectoriel) de chaque startup, s'il est applicable
 // 2. recalculer son score de momentum global avec la formule de lib/scoring/config.js
 // 3. enregistrer le résultat dans Supabase
-//
-// Les signaux funding / trends / press restent fictifs pour l'instant (prochaines étapes).
 
 import { supabase } from "@/lib/supabaseClient";
 import { getGithubScore } from "@/lib/scoring/sources/github";
