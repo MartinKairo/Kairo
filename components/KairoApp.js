@@ -3,7 +3,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { STARTING_CASH } from "@/lib/market";
 import { equityPctForInvestment, kcValueOfEquity, maxInvestableKc, MAX_STAKE_PCT_PER_STARTUP } from "@/lib/investing/equity";
-import { formatEur, formatPct, STAGE_LABELS, LIFECYCLE_LABELS } from "@/lib/investing/format";
+import { formatKc, formatPct, STAGE_LABELS, LIFECYCLE_LABELS } from "@/lib/investing/format";
 import { computeMomentumScore } from "@/lib/scoring/config";
 import AuthBox from "@/components/AuthBox";
 
@@ -527,7 +527,7 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
                   </div>
                   <div style={{ textAlign: "right", minWidth: 90 }}>
                     <div className="kairo-mono" style={{ fontWeight: 600, fontSize: 15 }}>
-                      {formatEur(s.currentPostMoneyEur)}
+                      {formatKc(s.currentPostMoneyEur)}
                     </div>
                     {held ? (
                       <div className="kairo-mono" style={{ fontSize: 12, color: "#FFB800" }}>
@@ -593,7 +593,7 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
                   <div>
                     <div style={{ fontSize: 11, color: "#5C6373", marginBottom: 3 }}>VALORISATION (dernier tour)</div>
                     <div className="kairo-mono" style={{ fontSize: 17, fontWeight: 700 }}>
-                      {formatEur(selectedValuation)}
+                      {formatKc(selectedValuation)}
                     </div>
                   </div>
                   {selected.lastRoundDate && (
@@ -664,11 +664,17 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
                       boxSizing: "border-box",
                     }}
                   />
-                  {previewEquityPct > 0 && (
-                    <div style={{ fontSize: 12, color: "#8A93A6", marginBottom: 10 }}>
-                      ≈ {formatPct(previewEquityPct)} de capital supplémentaire
-                    </div>
-                  )}
+                  <div
+                    className="kairo-mono"
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: previewEquityPct > 0 ? "#FFB800" : "#5C6373",
+                      marginBottom: 10,
+                    }}
+                  >
+                    Part cédée : {previewEquityPct > 0 ? formatPct(previewEquityPct) : "—"}
+                  </div>
                   <div style={{ fontSize: 11.5, color: "#5C6373", marginBottom: 14 }}>
                     Plafond {Math.round(MAX_STAKE_PCT_PER_STARTUP * 100)}% du capital — encore{" "}
                     {Math.max(0, Math.floor(selectedInvestable)).toLocaleString("fr-FR")} K¢ investissables ici.
@@ -751,12 +757,9 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
                   : []),
               ].map((row, i) => (
                 <div key={i} style={{ marginBottom: 10 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
+                  <div style={{ fontSize: 12.5, marginBottom: 4 }}>
                     <span style={{ color: "#8A93A6", display: "flex", alignItems: "center", gap: 5 }}>
                       {row.icon && <Github size={11} />} {row.l}
-                    </span>
-                    <span className="kairo-mono" style={{ color: "#EDEEF2" }}>
-                      {row.v}
                     </span>
                   </div>
                   <div style={{ height: 5, background: "#1C212B", borderRadius: 3, overflow: "hidden" }}>
