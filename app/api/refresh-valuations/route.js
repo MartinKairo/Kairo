@@ -16,9 +16,14 @@
 // Dédoublonnage : unique(startup_id, article_key) sur valuation_signals — un
 // article déjà vu (même lien/titre) pour une startup donnée n'est jamais
 // retraité, qu'il ait ou non donné lieu à une mise à jour la première fois.
+//
+// Après chaque application réussie, notifie par email les utilisateurs qui
+// détiennent une position sur la startup concernée — voir
+// lib/notify/valuationChangeNotifier.js et supabase/010_notifications.sql.
 
 import { supabase } from "@/lib/supabaseClient";
 import { fetchValuationFeeds, findValuationSignals } from "@/lib/scoring/sources/valuation";
+import { notifyPositionHolders } from "@/lib/notify/valuationChangeNotifier";
 
 // Cette route écrit dans financing_rounds/positions (dilution réelle), à la
 // différence des autres routes refresh-* qui ne font que mettre à jour un
@@ -163,6 +168,18 @@ export async function GET(request) {
         .update({ applied: true, financing_round_id: financingRoundId })
         .eq("id", inserted.id);
 
+      // Prévient les détenteurs d'une position sur cette startup — voir
+      // lib/notify/valuationChangeNotifier.js. No-op silencieux si
+      // SUPABASE_SERVICE_ROLE_KEY/RESEND_API_KEY ne sont pas configurées,
+      // donc ne bloque jamais l'application du changement lui-même.
+      const notifyResult = await notifyPositionHolders({
+        startupId: startup.id,
+        startupName: startup.name,
+        eventType: signal.detectedType,
+        newPostMoneyEur: signal.extractedPostMoneyEur,
+        articleUrl: signal.articleUrl,
+      });
+
       results.push({
         startup: startup.name,
         article: signal.articleTitle,
@@ -170,6 +187,7 @@ export async function GET(request) {
         applied: true,
         post_money_eur: signal.extractedPostMoneyEur,
         amount_eur: signal.extractedAmountEur,
+        notified: notifyResult.notified ?? 0,
       });
     }
   }
