@@ -1,7 +1,10 @@
 "use client";
 
-import { useState, useMemo, useEffect, useRef } from "react";
-import { SHARE_PRICE_MULTIPLIER, STARTING_CASH } from "@/lib/market";
+import { useState, useMemo, useEffect } from "react";
+import { STARTING_CASH } from "@/lib/market";
+import { equityPctForInvestment, kcValueOfEquity, maxInvestableKc, MAX_STAKE_PCT_PER_STARTUP } from "@/lib/investing/equity";
+import { formatEur, formatPct, STAGE_LABELS, LIFECYCLE_LABELS } from "@/lib/investing/format";
+import { computeMomentumScore } from "@/lib/scoring/config";
 import AuthBox from "@/components/AuthBox";
 
 const Icon = ({ path, size = 14, color = "currentColor", ...props }) => (
@@ -49,18 +52,6 @@ const Flame = (p) => (
     }
   />
 );
-const Plus = (p) => (
-  <Icon
-    {...p}
-    path={
-      <>
-        <line x1="12" y1="5" x2="12" y2="19" />
-        <line x1="5" y1="12" x2="19" y2="12" />
-      </>
-    }
-  />
-);
-const Minus = (p) => <Icon {...p} path={<line x1="5" y1="12" x2="19" y2="12" />} />;
 const Github = (p) => (
   <Icon
     {...p}
@@ -148,56 +139,126 @@ function StartupLogo({ startup, size = 40 }) {
   );
 }
 
-export default function KairoApp({ startups, initialCash, initialHoldings, userEmail }) {
+function LifecycleBadge({ status }) {
+  if (status === "active" || !status) return null;
+  const isExit = status === "exited";
+  return (
+    <span
+      style={{
+        fontSize: 10,
+        fontWeight: 700,
+        padding: "3px 7px",
+        borderRadius: 6,
+        letterSpacing: "0.03em",
+        background: isExit ? "#12351F" : "#2A1416",
+        color: isExit ? "#3DDC84" : "#FF8A8A",
+        border: `1px solid ${isExit ? "#1E4E2E" : "#4A2226"}`,
+      }}
+    >
+      {LIFECYCLE_LABELS[status] || status}
+    </span>
+  );
+}
+
+function StageBadge({ stage }) {
+  if (!stage) return null;
+  return (
+    <span
+      style={{
+        fontSize: 10,
+        fontWeight: 600,
+        padding: "3px 7px",
+        borderRadius: 6,
+        letterSpacing: "0.03em",
+        background: "#1C212B",
+        color: "#8A93A6",
+        border: "1px solid #232833",
+      }}
+    >
+      {STAGE_LABELS[stage] || stage}
+    </span>
+  );
+}
+
+export default function KairoApp({ startups, initialCash, initialPositions, userEmail }) {
   // Portefeuille persistant en base, propre à chaque utilisateur (comptes
-  // Supabase Auth par lien magique, table portfolio + holdings avec RLS, voir
-  // supabase/006_user_accounts.sql) — initialisé depuis les props chargées
-  // côté serveur (app/page.js), puis tenu à jour par les réponses de l'API
-  // /api/trade (qui fait foi : le cash et les parts ne sont jamais dérivés
-  // localement, contrairement à l'ancienne version 100% côté client).
+  // Supabase Auth par lien magique, table portfolio + positions avec RLS —
+  // voir supabase/006_user_accounts.sql et 007_equity_model.sql).
+  //
+  // Modèle "capital + dilution" (voir lib/investing/equity.js) : une position
+  // est un % de capital détenu (equityPct), pas un nombre de parts à un prix
+  // dérivé d'un score. La valeur affichée dépend de la valorisation courante
+  // de la startup (startup.currentPostMoneyEur), jamais du prix payé à
+  // l'achat (investedKc n'est gardé que pour afficher une plus/moins-value
+  // indicative).
   //
   // Pas connecté -> initialCash vaut null (voir app/page.js) : on affiche le
   // marché en lecture seule avec une invite de connexion (AuthBox) à la
   // place du solde, plutôt qu'un faux solde qui ne serait jamais sauvegardé.
   const isLoggedIn = Boolean(userEmail);
-  const [holdings, setHoldings] = useState(initialHoldings || {});
+  const [positions, setPositions] = useState(initialPositions || {});
   const [cash, setCash] = useState(initialCash);
   const [pendingId, setPendingId] = useState(null); // id de la startup en cours d'achat/vente
   const [tradeError, setTradeError] = useState(null);
   const [selected, setSelected] = useState(startups[0]);
   const [tab, setTab] = useState("marche");
   const [query, setQuery] = useState("");
+  const [amountKc, setAmountKc] = useState("");
+
+  // Remet le montant saisi à zéro quand on change de startup sélectionnée,
+  // pour éviter d'investir accidentellement le même montant ailleurs.
+  useEffect(() => {
+    setAmountKc("");
+    setTradeError(null);
+  }, [selected?.id]);
 
   const filtered = useMemo(() => {
-    const base = tab === "marche" ? startups : startups.filter((s) => holdings[s.id]);
+    const base = tab === "marche" ? startups : startups.filter((s) => positions[s.id]);
     if (!query.trim()) return base;
     const q = query.toLowerCase();
     return base.filter((s) => s.name.toLowerCase().includes(q) || s.sector.toLowerCase().includes(q));
-  }, [tab, startups, holdings, query]);
+  }, [tab, startups, positions, query]);
 
   const portfolioValue = useMemo(() => {
-    return Object.entries(holdings).reduce((sum, [id, shares]) => {
+    return Object.entries(positions).reduce((sum, [id, pos]) => {
       const s = startups.find((s) => s.id === Number(id));
-      return sum + (s ? s.score * SHARE_PRICE_MULTIPLIER * shares : 0);
+      return sum + (s ? kcValueOfEquity(pos.equityPct, s.currentPostMoneyEur) : 0);
     }, 0);
-  }, [holdings, startups]);
+  }, [positions, startups]);
 
   const totalWealth = cash === null ? 0 : cash + portfolioValue;
   const animatedWealth = useCountUp(totalWealth);
   const pnl = cash === null ? 0 : totalWealth - STARTING_CASH;
 
-  // Achat/vente d'UNE part, persisté en base via /api/trade (le prix est
-  // recalculé et validé côté serveur — voir app/api/trade/route.js). En cas
-  // d'erreur (capital insuffisant, rien à vendre, etc.), rien n'est modifié
-  // localement et le message renvoyé par l'API est affiché.
-  const trade = async (id, action) => {
+  const selectedPosition = selected ? positions[selected.id] : null;
+  const selectedValuation = selected?.currentPostMoneyEur ?? null;
+  const selectedInvestable = selectedValuation ? maxInvestableKc(selectedPosition?.equityPct ?? 0, selectedValuation) : 0;
+  const selectedIsActive = !selected || (selected.lifecycle_status ?? "active") === "active";
+
+  // Aperçu en direct (avant confirmation) du % de capital que le montant
+  // saisi permettrait d'acheter — même formule que côté serveur
+  // (app/api/invest/route.js), affichée ici uniquement à titre indicatif.
+  const previewEquityPct =
+    selected && selectedValuation && Number(amountKc) > 0 ? equityPctForInvestment(Number(amountKc), selectedValuation) : 0;
+
+  // Investir/céder un montant en K¢, persisté en base via /api/invest (le %
+  // de capital et le plafond sont recalculés et validés côté serveur — voir
+  // app/api/invest/route.js). En cas d'erreur (capital insuffisant, plafond
+  // de 20% atteint, rien à vendre, etc.), rien n'est modifié localement et le
+  // message renvoyé par l'API est affiché.
+  const invest = async (action) => {
+    const amount = Number(amountKc);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setTradeError("Montant invalide");
+      return;
+    }
     setTradeError(null);
-    setPendingId(id);
+    setPendingId(selected.id);
     try {
-      const res = await fetch("/api/trade", {
+      const res = await fetch("/api/invest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startupId: id, action }),
+        body: JSON.stringify({ startupId: selected.id, action, amountKc: amount }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -205,21 +266,19 @@ export default function KairoApp({ startups, initialCash, initialHoldings, userE
         return;
       }
       setCash(data.cash);
-      setHoldings((h) => {
-        const next = { ...h };
-        if (data.shares > 0) next[id] = data.shares;
-        else delete next[id];
+      setPositions((p) => {
+        const next = { ...p };
+        if (data.equityPct > 1e-9) next[selected.id] = { equityPct: data.equityPct, investedKc: data.investedKc };
+        else delete next[selected.id];
         return next;
       });
+      setAmountKc("");
     } catch {
       setTradeError("Erreur réseau, réessaie");
     } finally {
       setPendingId(null);
     }
   };
-
-  const buy = (id) => trade(id, "buy");
-  const sell = (id) => trade(id, "sell");
 
   return (
     <div style={{ minHeight: "100vh" }}>
@@ -385,19 +444,19 @@ export default function KairoApp({ startups, initialCash, initialHoldings, userE
                 Portefeuille fictif
               </div>
               <div className="kairo-display" style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em" }}>
-                Connecte-toi pour trader
+                Connecte-toi pour investir
               </div>
               <div style={{ marginTop: 8, fontSize: 13, color: "#8A93A6", maxWidth: 380 }}>
                 Crée un compte gratuit (email + lien magique, en haut à droite) pour recevoir 10&nbsp;000 K¢ fictifs et
-                suivre ton propre portefeuille.
+                prendre des participations dans de vraies startups, aux vraies valorisations de leurs derniers tours.
               </div>
             </div>
           )}
           <div style={{ display: "flex", gap: 28 }}>
             <div>
-              <div style={{ fontSize: 11, color: "#8A93A6", marginBottom: 4 }}>STARTUPS SUIVIES</div>
+              <div style={{ fontSize: 11, color: "#8A93A6", marginBottom: 4 }}>STARTUPS EN PORTEFEUILLE</div>
               <div className="kairo-display" style={{ fontSize: 22, fontWeight: 600 }}>
-                {Object.keys(holdings).length}
+                {Object.keys(positions).length}
               </div>
             </div>
           </div>
@@ -427,114 +486,63 @@ export default function KairoApp({ startups, initialCash, initialHoldings, userE
           ))}
         </div>
 
-        {tradeError && (
-          <div
-            style={{
-              background: "#2A1416",
-              border: "1px solid #4A2226",
-              color: "#FF8A8A",
-              fontSize: 13,
-              borderRadius: 10,
-              padding: "10px 14px",
-              marginBottom: 16,
-            }}
-          >
-            {tradeError}
-          </div>
-        )}
-
         <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 24 }}>
           <div>
-            {filtered.map((s) => (
-              <div
-                key={s.id}
-                onClick={() => setSelected(s)}
-                className="card-hover"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 16,
-                  background: selected.id === s.id ? "#151922" : "#101319",
-                  border: selected.id === s.id ? "1px solid #2A2F3A" : "1px solid #181C25",
-                  borderRadius: 14,
-                  padding: "14px 16px",
-                  marginBottom: 10,
-                }}
-              >
-                <StartupLogo startup={s} size={40} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontWeight: 600, fontSize: 14.5 }}>{s.name}</span>
-                    {s.delta > 4 && <Flame size={13} color="#FF6B35" />}
+            {filtered.map((s) => {
+              const momentum = computeMomentumScore({
+                funding: s.signal_funding,
+                trends: s.signal_trends,
+                press: s.signal_press,
+                github: s.signal_github,
+              });
+              const held = positions[s.id];
+              return (
+                <div
+                  key={s.id}
+                  onClick={() => setSelected(s)}
+                  className="card-hover"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 16,
+                    background: selected?.id === s.id ? "#151922" : "#101319",
+                    border: selected?.id === s.id ? "1px solid #2A2F3A" : "1px solid #181C25",
+                    borderRadius: 14,
+                    padding: "14px 16px",
+                    marginBottom: 10,
+                    opacity: s.lifecycle_status && s.lifecycle_status !== "active" ? 0.7 : 1,
+                  }}
+                >
+                  <StartupLogo startup={s} size={40} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontWeight: 600, fontSize: 14.5 }}>{s.name}</span>
+                      {momentum >= 70 && <Flame size={13} color="#FF6B35" />}
+                      <LifecycleBadge status={s.lifecycle_status} />
+                    </div>
+                    <div style={{ fontSize: 12.5, color: "#5C6373", marginTop: 2, display: "flex", alignItems: "center", gap: 6 }}>
+                      {s.sector}
+                      <StageBadge stage={s.stage} />
+                    </div>
                   </div>
-                  <div style={{ fontSize: 12.5, color: "#5C6373", marginTop: 2 }}>{s.sector}</div>
-                </div>
-                <div style={{ textAlign: "right", minWidth: 70 }}>
-                  <div className="kairo-mono" style={{ fontWeight: 600, fontSize: 15 }}>
-                    {s.score}
-                  </div>
-                  <div
-                    className="kairo-mono"
-                    style={{
-                      fontSize: 12,
-                      color: s.delta >= 0 ? "#3DDC84" : "#FF5C5C",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 2,
-                      justifyContent: "flex-end",
-                    }}
-                  >
-                    {s.delta >= 0 ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
-                    {s.delta >= 0 ? "+" : ""}
-                    {s.delta}%
+                  <div style={{ textAlign: "right", minWidth: 90 }}>
+                    <div className="kairo-mono" style={{ fontWeight: 600, fontSize: 15 }}>
+                      {formatEur(s.currentPostMoneyEur)}
+                    </div>
+                    {held ? (
+                      <div className="kairo-mono" style={{ fontSize: 12, color: "#FFB800" }}>
+                        {formatPct(held.equityPct)} détenu
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: "#5C6373" }}>momentum {momentum}</div>
+                    )}
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                  <button
-                    onClick={() => sell(s.id)}
-                    disabled={!isLoggedIn || !holdings[s.id] || pendingId === s.id}
-                    style={{
-                      width: 28,
-                      height: 28,
-                      borderRadius: 8,
-                      border: "1px solid #232833",
-                      background: "#151922",
-                      color: holdings[s.id] ? "#EDEEF2" : "#3A3F4A",
-                      opacity: pendingId === s.id ? 0.5 : 1,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <Minus size={13} />
-                  </button>
-                  <span className="kairo-mono" style={{ minWidth: 18, textAlign: "center", fontSize: 13, alignSelf: "center" }}>
-                    {holdings[s.id] || 0}
-                  </span>
-                  <button
-                    onClick={() => buy(s.id)}
-                    disabled={!isLoggedIn || pendingId === s.id}
-                    style={{
-                      width: 28,
-                      height: 28,
-                      borderRadius: 8,
-                      border: "none",
-                      background: "#FFB800",
-                      color: "#0B0E14",
-                      opacity: pendingId === s.id ? 0.5 : 1,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <Plus size={13} />
-                  </button>
-                </div>
-              </div>
-            ))}
-            {tab === "portefeuille" && Object.keys(holdings).length === 0 && (
+              );
+            })}
+            {tab === "portefeuille" && Object.keys(positions).length === 0 && (
               <div style={{ textAlign: "center", padding: "60px 20px", color: "#5C6373" }}>
-                Aucune startup en portefeuille pour l&apos;instant. Achète tes premières parts depuis l&apos;onglet Marché.
+                Aucune participation pour l&apos;instant. Investis dans tes premières startups depuis l&apos;onglet Marché.
               </div>
             )}
             {filtered.length === 0 && tab === "marche" && (
@@ -544,112 +552,245 @@ export default function KairoApp({ startups, initialCash, initialHoldings, userE
             )}
           </div>
 
-          <div
-            style={{
-              background: "#101319",
-              border: "1px solid #181C25",
-              borderRadius: 16,
-              padding: 22,
-              height: "fit-content",
-              position: "sticky",
-              top: 90,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-              <StartupLogo startup={selected} size={44} />
-              <div>
-                <div className="kairo-display" style={{ fontWeight: 700, fontSize: 16 }}>
-                  {selected.name}
-                </div>
-                <div style={{ fontSize: 12.5, color: "#5C6373" }}>{selected.sector}</div>
-              </div>
-            </div>
-
-            <div style={{ fontSize: 13, color: "#B0B6C4", lineHeight: 1.5, marginBottom: 20 }}>{selected.blurb}</div>
-
+          {selected && (
             <div
               style={{
-                fontSize: 11,
-                color: "#5C6373",
-                textTransform: "uppercase",
-                letterSpacing: "0.04em",
-                marginBottom: 10,
+                background: "#101319",
+                border: "1px solid #181C25",
+                borderRadius: 16,
+                padding: 22,
+                height: "fit-content",
+                position: "sticky",
+                top: 90,
               }}
             >
-              Composition du score
-            </div>
-            {[
-              { l: "Levées / funding (40%)", v: selected.signal_funding },
-              { l: "Tendance de recherche (20%)", v: selected.signal_trends },
-              { l: "Mentions presse (20%)", v: selected.signal_press },
-              ...(selected.signal_github !== null && selected.signal_github !== undefined
-                ? [{ l: "Activité GitHub (bonus, +20 pts max)", v: selected.signal_github, icon: true }]
-                : []),
-            ].map((row, i) => (
-              <div key={i} style={{ marginBottom: 10 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
-                  <span style={{ color: "#8A93A6", display: "flex", alignItems: "center", gap: 5 }}>
-                    {row.icon && <Github size={11} />} {row.l}
-                  </span>
-                  <span className="kairo-mono" style={{ color: "#EDEEF2" }}>
-                    {row.v}
-                  </span>
-                </div>
-                <div style={{ height: 5, background: "#1C212B", borderRadius: 3, overflow: "hidden" }}>
-                  <div
-                    style={{
-                      width: `${row.v}%`,
-                      height: "100%",
-                      background: "linear-gradient(90deg, #FFB800, #FF6B35)",
-                      borderRadius: 3,
-                    }}
-                  />
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+                <StartupLogo startup={selected} size={44} />
+                <div>
+                  <div className="kairo-display" style={{ fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+                    {selected.name}
+                    <LifecycleBadge status={selected.lifecycle_status} />
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "#5C6373", display: "flex", alignItems: "center", gap: 6 }}>
+                    {selected.sector}
+                    <StageBadge stage={selected.stage} />
+                  </div>
                 </div>
               </div>
-            ))}
 
-            {selected.github_org && (
-              <a
-                href={`https://github.com/${selected.github_org}`}
-                target="_blank"
-                rel="noopener noreferrer"
+              <div style={{ fontSize: 13, color: "#B0B6C4", lineHeight: 1.5, marginBottom: 18 }}>{selected.blurb}</div>
+
+              <div
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  fontSize: 12,
-                  color: "#5C6373",
-                  marginTop: 4,
-                  marginBottom: 16,
+                  background: "#0B0E14",
+                  border: "1px solid #1C212B",
+                  borderRadius: 12,
+                  padding: "14px 16px",
+                  marginBottom: 18,
                 }}
               >
-                <Github size={12} /> github.com/{selected.github_org}
-              </a>
-            )}
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: selectedPosition ? 10 : 0 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: "#5C6373", marginBottom: 3 }}>VALORISATION (dernier tour)</div>
+                    <div className="kairo-mono" style={{ fontSize: 17, fontWeight: 700 }}>
+                      {formatEur(selectedValuation)}
+                    </div>
+                  </div>
+                  {selected.lastRoundDate && (
+                    <div style={{ textAlign: "right", fontSize: 11.5, color: "#5C6373" }}>
+                      {new Date(selected.lastRoundDate).toLocaleDateString("fr-FR", { year: "numeric", month: "short" })}
+                    </div>
+                  )}
+                </div>
+                {selectedPosition && (
+                  <div style={{ borderTop: "1px solid #1C212B", paddingTop: 10, display: "flex", justifyContent: "space-between" }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: "#5C6373", marginBottom: 3 }}>TA PARTICIPATION</div>
+                      <div className="kairo-mono" style={{ fontSize: 14, fontWeight: 600, color: "#FFB800" }}>
+                        {formatPct(selectedPosition.equityPct)}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 11, color: "#5C6373", marginBottom: 3 }}>VALEUR ACTUELLE</div>
+                      <div className="kairo-mono" style={{ fontSize: 14, fontWeight: 600 }}>
+                        {kcValueOfEquity(selectedPosition.equityPct, selectedValuation).toLocaleString("fr-FR", {
+                          maximumFractionDigits: 0,
+                        })}{" "}
+                        K¢
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
 
-            <button
-              onClick={() => buy(selected.id)}
-              disabled={!isLoggedIn || pendingId === selected.id}
-              style={{
-                width: "100%",
-                marginTop: 4,
-                padding: "12px",
-                borderRadius: 10,
-                border: "none",
-                background: "#FFB800",
-                color: "#0B0E14",
-                fontWeight: 700,
-                fontSize: 14,
-                opacity: !isLoggedIn || pendingId === selected.id ? 0.6 : 1,
-              }}
-            >
-              {pendingId === selected.id
-                ? "…"
-                : isLoggedIn
-                ? `Acheter 1 part — ${(selected.score * SHARE_PRICE_MULTIPLIER).toLocaleString("fr-FR")} K¢`
-                : "Connecte-toi pour acheter"}
-            </button>
-          </div>
+              {!selectedIsActive ? (
+                <div style={{ fontSize: 13, color: "#8A93A6", padding: "10px 0" }}>
+                  {selected.lifecycle_status === "exited"
+                    ? "Cette startup a été rachetée : les détenteurs ont déjà été payés, plus investissable."
+                    : "Cette startup a cessé son activité : plus investissable."}
+                </div>
+              ) : !selectedValuation ? (
+                <div style={{ fontSize: 13, color: "#8A93A6", padding: "10px 0" }}>
+                  Aucun tour de financement sourcé pour l&apos;instant — pas encore investissable.
+                </div>
+              ) : (
+                <>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "#5C6373",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.04em",
+                      marginBottom: 8,
+                    }}
+                  >
+                    Investir / céder (K¢)
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    value={amountKc}
+                    onChange={(e) => setAmountKc(e.target.value)}
+                    placeholder="Montant en K¢"
+                    style={{
+                      width: "100%",
+                      background: "#151922",
+                      border: "1px solid #232833",
+                      borderRadius: 10,
+                      padding: "10px 12px",
+                      color: "#EDEEF2",
+                      fontSize: 14,
+                      marginBottom: 8,
+                      boxSizing: "border-box",
+                    }}
+                  />
+                  {previewEquityPct > 0 && (
+                    <div style={{ fontSize: 12, color: "#8A93A6", marginBottom: 10 }}>
+                      ≈ {formatPct(previewEquityPct)} de capital supplémentaire
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11.5, color: "#5C6373", marginBottom: 14 }}>
+                    Plafond {Math.round(MAX_STAKE_PCT_PER_STARTUP * 100)}% du capital — encore{" "}
+                    {Math.max(0, Math.floor(selectedInvestable)).toLocaleString("fr-FR")} K¢ investissables ici.
+                  </div>
+
+                  {tradeError && (
+                    <div
+                      style={{
+                        background: "#2A1416",
+                        border: "1px solid #4A2226",
+                        color: "#FF8A8A",
+                        fontSize: 12.5,
+                        borderRadius: 10,
+                        padding: "9px 12px",
+                        marginBottom: 12,
+                      }}
+                    >
+                      {tradeError}
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      onClick={() => invest("buy")}
+                      disabled={!isLoggedIn || pendingId === selected.id}
+                      style={{
+                        flex: 1,
+                        padding: "12px",
+                        borderRadius: 10,
+                        border: "none",
+                        background: "#FFB800",
+                        color: "#0B0E14",
+                        fontWeight: 700,
+                        fontSize: 13.5,
+                        opacity: !isLoggedIn || pendingId === selected.id ? 0.6 : 1,
+                      }}
+                    >
+                      {pendingId === selected.id ? "…" : isLoggedIn ? "Investir" : "Connecte-toi"}
+                    </button>
+                    {selectedPosition && (
+                      <button
+                        onClick={() => invest("sell")}
+                        disabled={pendingId === selected.id}
+                        style={{
+                          flex: 1,
+                          padding: "12px",
+                          borderRadius: 10,
+                          border: "1px solid #232833",
+                          background: "#151922",
+                          color: "#EDEEF2",
+                          fontWeight: 700,
+                          fontSize: 13.5,
+                          opacity: pendingId === selected.id ? 0.6 : 1,
+                        }}
+                      >
+                        Céder
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "#5C6373",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.04em",
+                  margin: "20px 0 10px",
+                }}
+              >
+                Signaux momentum (informatif — n&apos;influence pas la valorisation)
+              </div>
+              {[
+                { l: "Levées / funding (40%)", v: selected.signal_funding },
+                { l: "Tendance de recherche (20%)", v: selected.signal_trends },
+                { l: "Mentions presse (20%)", v: selected.signal_press },
+                ...(selected.signal_github !== null && selected.signal_github !== undefined
+                  ? [{ l: "Activité GitHub (bonus, +20 pts max)", v: selected.signal_github, icon: true }]
+                  : []),
+              ].map((row, i) => (
+                <div key={i} style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
+                    <span style={{ color: "#8A93A6", display: "flex", alignItems: "center", gap: 5 }}>
+                      {row.icon && <Github size={11} />} {row.l}
+                    </span>
+                    <span className="kairo-mono" style={{ color: "#EDEEF2" }}>
+                      {row.v}
+                    </span>
+                  </div>
+                  <div style={{ height: 5, background: "#1C212B", borderRadius: 3, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        width: `${row.v}%`,
+                        height: "100%",
+                        background: "linear-gradient(90deg, #FFB800, #FF6B35)",
+                        borderRadius: 3,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+
+              {selected.github_org && (
+                <a
+                  href={`https://github.com/${selected.github_org}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    fontSize: 12,
+                    color: "#5C6373",
+                    marginTop: 4,
+                  }}
+                >
+                  <Github size={12} /> github.com/{selected.github_org}
+                </a>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
