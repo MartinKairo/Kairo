@@ -41,9 +41,20 @@ export default async function Home() {
   const startups = (startupsRaw ?? [])
     .map((s) => {
       const v = valuationByStartup[s.id];
+      const anchorEur = v?.current_post_money_eur ?? null;
+      // Valorisation affichée/investissable = ancre (dernière levée réelle
+      // sourcée, inchangée) × (1 + écart du jour) — voir
+      // supabase/011_relative_valuation.sql et lib/scoring/sources/momentum.js.
+      // L'écart oscille autour de 0 chaque jour (tendance presse + buzz),
+      // borné à ±40%, et repart à 0 dès qu'une nouvelle levée réelle déplace
+      // l'ancre. Pas d'ancre connue -> pas d'oscillation à appliquer (null).
+      const offsetPct = Number(s.valuation_offset_pct ?? 0);
+      const currentPostMoneyEur = anchorEur !== null ? anchorEur * (1 + offsetPct) : null;
       return {
         ...s,
-        currentPostMoneyEur: v?.current_post_money_eur ?? null,
+        currentPostMoneyEur,
+        anchorPostMoneyEur: anchorEur,
+        valuationOffsetPct: offsetPct,
         lastRoundDate: v?.last_round_date ?? null,
       };
     })

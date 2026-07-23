@@ -23,7 +23,15 @@
 
 import { supabase } from "@/lib/supabaseClient";
 import { fetchValuationFeeds, findValuationSignals } from "@/lib/scoring/sources/valuation";
+import { getDailySentiment } from "@/lib/scoring/sources/sentiment";
+import { computeNextOffset, MOMENTUM_CONSTANTS } from "@/lib/scoring/sources/momentum";
 import { notifyPositionHolders } from "@/lib/notify/valuationChangeNotifier";
+
+// Écart de valuation_offset_pct (voir momentum.js) à partir duquel un
+// mouvement du jour est jugé assez notable pour justifier un email — sinon
+// chaque petite oscillation quotidienne spammerait les détenteurs. 0.08 = 8
+// points de pourcentage d'écart par rapport à la veille (ex: -3% -> +6%).
+const NOTIFY_MOVE_THRESHOLD = 0.08;
 
 // Cette route écrit dans financing_rounds/positions (dilution réelle), à la
 // différence des autres routes refresh-* qui ne font que mettre à jour un
@@ -192,11 +200,141 @@ export async function GET(request) {
     }
   }
 
+  // --- Phase 2 : tendance + buzz (voir supabase/011_relative_valuation.sql
+  // et lib/scoring/sources/momentum.js) ---
+  // Fait osciller valuation_offset_pct de CHAQUE startup, une fois par jour
+  // (contrainte Vercel Cron Hobby : 1 déclenchement/jour max — voir
+  // vercel.json), indépendamment de la Phase 1 ci-dessus (qui ne bouge
+  // l'ANCRE que sur une vraie levée détectée, un événement rare). Réutilise
+  // les mêmes flux RSS déjà récupérés (feeds), pas de second fetch.
+  const today = new Date().toISOString().slice(0, 10);
+  const { data: valuations, error: valuationsError } = await supabase
+    .from("startup_valuations")
+    .select("startup_id, current_post_money_eur");
+
+  const momentumResults = [];
+
+  if (valuationsError) {
+    momentumResults.push({ ok: false, error: `lecture startup_valuations: ${valuationsError.message}` });
+  } else {
+    const anchorByStartup = Object.fromEntries(
+      (valuations ?? []).map((v) => [v.startup_id, Number(v.current_post_money_eur)])
+    );
+
+    for (const startup of startups) {
+      const anchorEur = anchorByStartup[startup.id] ?? null;
+      // Pas d'ancre connue (aucun tour enregistré) -> rien à faire osciller,
+      // cohérent avec le tri de app/page.js qui met ces startups en dernier.
+      if (!anchorEur || anchorEur <= 0) continue;
+
+      const todaySignal = getDailySentiment(startup.name, feeds);
+
+      // Journalise le signal du jour AVANT de lire l'historique pour le
+      // buzz : on veut comparer aujourd'hui à ce qui précède, jamais à
+      // lui-même. On upsert quand même en premier (idempotent, clé unique
+      // startup_id+observed_date) car un ré-appel le même jour doit écraser
+      // la valeur du jour, pas la dupliquer.
+      const { data: priorHistory, error: priorError } = await supabase
+        .from("signal_history")
+        .select("mentions_count, sentiment_score")
+        .eq("startup_id", startup.id)
+        .lt("observed_date", today)
+        .order("observed_date", { ascending: false })
+        .limit(30);
+
+      const { error: upsertError } = await supabase.from("signal_history").upsert(
+        {
+          startup_id: startup.id,
+          observed_date: today,
+          mentions_count: todaySignal.mentionsCount,
+          sentiment_score: todaySignal.sentimentScore,
+        },
+        { onConflict: "startup_id,observed_date" }
+      );
+
+      if (priorError || upsertError) {
+        momentumResults.push({
+          startup: startup.name,
+          ok: false,
+          error: priorError?.message ?? upsertError?.message,
+        });
+        continue;
+      }
+
+      const { data: recentHistoryRaw, error: recentError } = await supabase
+        .from("signal_history")
+        .select("sentiment_score")
+        .eq("startup_id", startup.id)
+        .lte("observed_date", today)
+        .order("observed_date", { ascending: false })
+        .limit(MOMENTUM_CONSTANTS.TREND_WINDOW_DAYS);
+
+      if (recentError) {
+        momentumResults.push({ startup: startup.name, ok: false, error: recentError.message });
+        continue;
+      }
+
+      const oldOffsetPct = Number(startup.valuation_offset_pct ?? 0);
+      const { newOffsetPct } = computeNextOffset({
+        oldOffsetPct,
+        today: {
+          mentionsCount: todaySignal.mentionsCount,
+          sentimentScore: todaySignal.sentimentScore,
+        },
+        priorHistory: (priorHistory ?? []).map((h) => ({
+          mentionsCount: h.mentions_count,
+          sentimentScore: h.sentiment_score === null ? null : Number(h.sentiment_score),
+        })),
+        recentHistoryWithToday: (recentHistoryRaw ?? []).map((h) => ({
+          sentimentScore: h.sentiment_score === null ? null : Number(h.sentiment_score),
+        })),
+      });
+
+      const { error: updateError } = await supabase
+        .from("startups")
+        .update({ valuation_offset_pct: newOffsetPct })
+        .eq("id", startup.id);
+
+      if (updateError) {
+        momentumResults.push({ startup: startup.name, ok: false, error: updateError.message });
+        continue;
+      }
+
+      const moved = Math.abs(newOffsetPct - oldOffsetPct);
+      let notified = 0;
+      if (moved >= NOTIFY_MOVE_THRESHOLD) {
+        const notifyResult = await notifyPositionHolders({
+          startupId: startup.id,
+          startupName: startup.name,
+          eventType: "daily_move",
+          newPostMoneyEur: anchorEur * (1 + newOffsetPct),
+          offsetPct: newOffsetPct,
+        });
+        notified = notifyResult.notified ?? 0;
+      }
+
+      momentumResults.push({
+        startup: startup.name,
+        ok: true,
+        mentions_today: todaySignal.mentionsCount,
+        sentiment_today: todaySignal.sentimentScore,
+        old_offset_pct: oldOffsetPct,
+        new_offset_pct: newOffsetPct,
+        notified,
+      });
+    }
+  }
+
   return Response.json({
     examined: results.length,
     applied: results.filter((r) => r.applied).length,
     results,
     feeds_ok: feeds.length,
     feeds_total: 3,
+    momentum: {
+      processed: momentumResults.length,
+      notable_moves: momentumResults.filter((r) => (r.notified ?? 0) > 0).length,
+      results: momentumResults,
+    },
   });
 }
