@@ -6,6 +6,7 @@ import { equityPctForInvestment, kcValueOfEquity, maxInvestableKc, MAX_STAKE_PCT
 import { formatKc, formatPct, STAGE_LABELS, LIFECYCLE_LABELS } from "@/lib/investing/format";
 import { computeMomentumScore } from "@/lib/scoring/config";
 import AuthBox from "@/components/AuthBox";
+import { createClient } from "@/lib/supabase/client";
 
 const Icon = ({ path, size = 14, color = "currentColor", ...props }) => (
   <svg
@@ -180,7 +181,7 @@ function StageBadge({ stage }) {
   );
 }
 
-export default function KairoApp({ startups, initialCash, initialPositions, userEmail }) {
+export default function KairoApp({ startups, initialCash, initialPositions, userEmail, userId, displayName, leaderboard }) {
   // Portefeuille persistant en base, propre à chaque utilisateur (comptes
   // Supabase Auth par lien magique, table portfolio + positions avec RLS —
   // voir supabase/006_user_accounts.sql et 007_equity_model.sql).
@@ -204,6 +205,41 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
   const [tab, setTab] = useState("marche");
   const [query, setQuery] = useState("");
   const [amountKc, setAmountKc] = useState("");
+
+  // Pseudo public (table profiles, voir supabase/014_profiles_and_leaderboard.sql) :
+  // édité directement depuis le navigateur via le client Supabase authentifié,
+  // la policy RLS "Chacun modifie son propre pseudo" garantit qu'on ne peut
+  // écrire que sa propre ligne (filtrée par user_id ici en plus, par sécurité
+  // défensive côté client).
+  const [pseudoInput, setPseudoInput] = useState(displayName || "");
+  const [pseudoSaving, setPseudoSaving] = useState(false);
+  const [pseudoMsg, setPseudoMsg] = useState(null);
+
+  const savePseudo = async () => {
+    const trimmed = pseudoInput.trim();
+    if (!trimmed) {
+      setPseudoMsg({ type: "error", text: "Le pseudo ne peut pas être vide" });
+      return;
+    }
+    setPseudoSaving(true);
+    setPseudoMsg(null);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase
+        .from("profiles")
+        .update({ display_name: trimmed, updated_at: new Date().toISOString() })
+        .eq("user_id", userId);
+      if (error) {
+        setPseudoMsg({ type: "error", text: "Erreur lors de l'enregistrement" });
+        return;
+      }
+      setPseudoMsg({ type: "success", text: "Pseudo mis à jour" });
+    } catch {
+      setPseudoMsg({ type: "error", text: "Erreur réseau, réessaie" });
+    } finally {
+      setPseudoSaving(false);
+    }
+  };
 
   // Remet le montant saisi à zéro quand on change de startup sélectionnée,
   // pour éviter d'investir accidentellement le même montant ailleurs.
@@ -466,6 +502,7 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
           {[
             { k: "marche", l: "Marché" },
             { k: "portefeuille", l: "Mon portefeuille" },
+            { k: "classement", l: "Classement" },
           ].map((t) => (
             <button
               key={t.k}
@@ -486,6 +523,119 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
           ))}
         </div>
 
+        {tab === "classement" ? (
+          <div style={{ maxWidth: 640 }}>
+            {isLoggedIn && (
+              <div
+                style={{
+                  background: "#101319",
+                  border: "1px solid #181C25",
+                  borderRadius: 14,
+                  padding: 18,
+                  marginBottom: 20,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "#5C6373",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.04em",
+                    marginBottom: 10,
+                  }}
+                >
+                  Ton pseudo public (visible dans le classement)
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    value={pseudoInput}
+                    onChange={(e) => {
+                      setPseudoInput(e.target.value);
+                      setPseudoMsg(null);
+                    }}
+                    maxLength={40}
+                    placeholder="Ton pseudo"
+                    style={{
+                      flex: 1,
+                      background: "#151922",
+                      border: "1px solid #232833",
+                      borderRadius: 10,
+                      padding: "10px 12px",
+                      color: "#EDEEF2",
+                      fontSize: 14,
+                      boxSizing: "border-box",
+                    }}
+                  />
+                  <button
+                    onClick={savePseudo}
+                    disabled={pseudoSaving}
+                    style={{
+                      padding: "10px 16px",
+                      borderRadius: 10,
+                      border: "none",
+                      background: "#FFB800",
+                      color: "#0B0E14",
+                      fontWeight: 700,
+                      fontSize: 13.5,
+                      opacity: pseudoSaving ? 0.6 : 1,
+                    }}
+                  >
+                    {pseudoSaving ? "…" : "Enregistrer"}
+                  </button>
+                </div>
+                {pseudoMsg && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      fontSize: 12.5,
+                      color: pseudoMsg.type === "error" ? "#FF8A8A" : "#3DDC84",
+                    }}
+                  >
+                    {pseudoMsg.text}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={{ background: "#101319", border: "1px solid #181C25", borderRadius: 14, overflow: "hidden" }}>
+              {(leaderboard ?? []).length === 0 ? (
+                <div style={{ textAlign: "center", padding: "40px 20px", color: "#5C6373" }}>
+                  Personne au classement pour l&apos;instant.
+                </div>
+              ) : (
+                leaderboard.map((row, i) => {
+                  const isMe = isLoggedIn && row.display_name === pseudoInput;
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 14,
+                        padding: "12px 18px",
+                        borderBottom: i < leaderboard.length - 1 ? "1px solid #181C25" : "none",
+                        background: isMe ? "#1C1710" : "transparent",
+                      }}
+                    >
+                      <div
+                        className="kairo-mono"
+                        style={{ width: 28, textAlign: "right", color: "#5C6373", fontSize: 13, fontWeight: 600 }}
+                      >
+                        {i + 1}
+                      </div>
+                      <div style={{ flex: 1, fontSize: 14, fontWeight: 600, color: isMe ? "#FFB800" : "#EDEEF2" }}>
+                        {row.display_name}
+                      </div>
+                      <div className="kairo-mono" style={{ fontSize: 14, fontWeight: 600 }}>
+                        {Number(row.total_value_kc).toLocaleString("fr-FR", { maximumFractionDigits: 0 })} K¢
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        ) : (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 24 }}>
           <div>
             {filtered.map((s) => {
@@ -795,6 +945,7 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );

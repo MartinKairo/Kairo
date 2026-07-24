@@ -37,6 +37,11 @@ export default async function Home() {
     );
   }
 
+  // Classement public (pseudo + valeur totale calculée côté SQL, jamais le
+  // cash/positions de quelqu'un d'autre) — voir supabase/014_profiles_and_leaderboard.sql.
+  // Visible même déconnecté (donnée publique), comme le marché.
+  const { data: leaderboardRows } = await supabase.from("leaderboard").select("*");
+
   const valuationByStartup = Object.fromEntries((valuations ?? []).map((v) => [v.startup_id, v]));
   const startups = (startupsRaw ?? [])
     .map((s) => {
@@ -66,15 +71,26 @@ export default async function Home() {
   // Pas connecté -> pas de portefeuille à charger, KairoApp affiche le
   // marché en lecture seule avec une invite de connexion à la place du solde.
   if (!user) {
-    return <KairoApp startups={startups} initialCash={null} initialPositions={{}} userEmail={null} />;
+    return (
+      <KairoApp
+        startups={startups}
+        initialCash={null}
+        initialPositions={{}}
+        userEmail={null}
+        leaderboard={leaderboardRows ?? []}
+      />
+    );
   }
 
   // portfolio/positions peuvent être absents si supabase/006_user_accounts.sql
   // ou 007_equity_model.sql n'ont pas encore été exécutés -> on retombe sur un
   // portefeuille par défaut plutôt que de faire planter la page.
-  const [{ data: portfolio }, { data: positionsRows }] = await Promise.all([
+  // profiles peut être absent si supabase/014_profiles_and_leaderboard.sql
+  // n'a pas encore été exécutée -> pseudo par défaut nul, pas de plantage.
+  const [{ data: portfolio }, { data: positionsRows }, { data: profile }] = await Promise.all([
     supabase.from("portfolio").select("*").eq("user_id", user.id).maybeSingle(),
     supabase.from("positions").select("*").eq("user_id", user.id),
+    supabase.from("profiles").select("display_name").eq("user_id", user.id).maybeSingle(),
   ]);
 
   const initialCash = portfolio?.cash ?? STARTING_CASH;
@@ -85,6 +101,14 @@ export default async function Home() {
   );
 
   return (
-    <KairoApp startups={startups} initialCash={initialCash} initialPositions={initialPositions} userEmail={user.email} />
+    <KairoApp
+      startups={startups}
+      initialCash={initialCash}
+      initialPositions={initialPositions}
+      userEmail={user.email}
+      userId={user.id}
+      displayName={profile?.display_name ?? null}
+      leaderboard={leaderboardRows ?? []}
+    />
   );
 }
