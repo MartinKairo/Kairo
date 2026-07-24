@@ -104,46 +104,12 @@ function useCountUp(target, duration = 600) {
   return val;
 }
 
-function StartupLogo({ startup, size = 40 }) {
-  const [failed, setFailed] = useState(false);
-  const initials = startup.name.slice(0, 2).toUpperCase();
-  return (
-    <div
-      style={{
-        width: size,
-        height: size,
-        borderRadius: size > 30 ? 10 : 8,
-        background: "#FFB80022",
-        border: "1px solid #FFB80055",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-        overflow: "hidden",
-      }}
-    >
-      {!failed ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          // logo.clearbit.com (ex-service gratuit) a été décommissionné par
-          // Clearbit/HubSpot (DNS ne résout plus) -> remplacé par unavatar.io,
-          // même principe (URL basée sur le domaine, sans clé API), qui
-          // agrège plusieurs sources de logos avec son propre fallback interne.
-          src={`https://unavatar.io/${startup.website_domain}`}
-          alt={startup.name}
-          width={size}
-          height={size}
-          onError={() => setFailed(true)}
-          style={{ objectFit: "cover" }}
-        />
-      ) : (
-        <span className="kairo-display" style={{ color: "#FFB800", fontWeight: 700, fontSize: size > 30 ? 14 : 12 }}>
-          {initials}
-        </span>
-      )}
-    </div>
-  );
-}
+// Volontairement PAS de logo (ni image externe, ni pastille stylisée type
+// "branding") — voir échange du 2026-07-24 sur le risque de dénigrement :
+// pour des startups réelles identifiables, on limite l'app au strict texte
+// factuel (nom en typo neutre, pas de traitement visuel qui suggère un
+// partenariat/une caution de la marque). Remplace l'ancien composant
+// StartupLogo (image logo.clearbit.com puis unavatar.io).
 
 function LifecycleBadge({ status }) {
   if (status === "active" || !status) return null;
@@ -1057,7 +1023,6 @@ export default function KairoApp({
                     opacity: s.lifecycle_status && s.lifecycle_status !== "active" ? 0.7 : 1,
                   }}
                 >
-                  <StartupLogo startup={s} size={40} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ fontWeight: 600, fontSize: 14.5 }}>{s.name}</span>
@@ -1106,21 +1071,32 @@ export default function KairoApp({
                 top: 90,
               }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-                <StartupLogo startup={selected} size={44} />
-                <div>
-                  <div className="kairo-display" style={{ fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
-                    {selected.name}
-                    <LifecycleBadge status={selected.lifecycle_status} />
-                  </div>
-                  <div style={{ fontSize: 12.5, color: "#5C6373", display: "flex", alignItems: "center", gap: 6 }}>
-                    {selected.sector}
-                    <StageBadge stage={selected.stage} />
-                  </div>
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+                  {selected.name}
+                  <LifecycleBadge status={selected.lifecycle_status} />
+                </div>
+                <div style={{ fontSize: 12.5, color: "#5C6373", display: "flex", alignItems: "center", gap: 6 }}>
+                  {selected.sector}
+                  <StageBadge stage={selected.stage} />
                 </div>
               </div>
 
               <div style={{ fontSize: 13, color: "#B0B6C4", lineHeight: 1.5, marginBottom: 18 }}>{selected.blurb}</div>
+
+              <div
+                style={{
+                  fontSize: 11.5,
+                  color: "#5C6373",
+                  fontStyle: "italic",
+                  lineHeight: 1.4,
+                  marginBottom: 14,
+                  paddingBottom: 14,
+                  borderBottom: "1px solid #1C212B",
+                }}
+              >
+                Estimation basée sur données publiques, à but ludique.
+              </div>
 
               <div
                 style={{
