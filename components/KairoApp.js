@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { STARTING_CASH } from "@/lib/market";
 import { equityPctForInvestment, kcValueOfEquity, maxInvestableKc, MAX_STAKE_PCT_PER_STARTUP } from "@/lib/investing/equity";
 import { formatKc, formatPct, STAGE_LABELS, LIFECYCLE_LABELS } from "@/lib/investing/format";
@@ -181,7 +182,18 @@ function StageBadge({ stage }) {
   );
 }
 
-export default function KairoApp({ startups, initialCash, initialPositions, userEmail, userId, displayName, leaderboard }) {
+export default function KairoApp({
+  startups,
+  initialCash,
+  initialPositions,
+  userEmail,
+  userId,
+  displayName,
+  leaderboard,
+  myClubs,
+  clubLeaderboard,
+}) {
+  const router = useRouter();
   // Portefeuille persistant en base, propre à chaque utilisateur (comptes
   // Supabase Auth par lien magique, table portfolio + positions avec RLS —
   // voir supabase/006_user_accounts.sql et 007_equity_model.sql).
@@ -240,6 +252,97 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
       setPseudoMsg({ type: "error", text: "Erreur réseau, réessaie" });
     } finally {
       setPseudoSaving(false);
+    }
+  };
+
+  // Clubs (mini-championnats entre amis, voir supabase/015_clubs.sql) :
+  // créer/rejoindre passent par des fonctions SQL security definer
+  // (create_club/join_club) plutôt que des inserts directs, car rejoindre un
+  // club nécessite de connaître son code d'invitation — le seul chemin
+  // d'accès prévu, pas une simple policy RLS sur user_id. myClubs et
+  // clubLeaderboard viennent du Server Component (app/page.js, déjà filtrés
+  // sur l'utilisateur connecté) ; router.refresh() les recharge après chaque
+  // action plutôt que de dupliquer leur logique côté client.
+  const [clubNameInput, setClubNameInput] = useState("");
+  const [clubCodeInput, setClubCodeInput] = useState("");
+  const [clubBusy, setClubBusy] = useState(false);
+  const [clubMsg, setClubMsg] = useState(null);
+  const [expandedClubId, setExpandedClubId] = useState(null);
+
+  const createClub = async () => {
+    const trimmed = clubNameInput.trim();
+    if (!trimmed) {
+      setClubMsg({ type: "error", text: "Nom de club invalide" });
+      return;
+    }
+    setClubBusy(true);
+    setClubMsg(null);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.rpc("create_club", { p_name: trimmed });
+      if (error) {
+        setClubMsg({ type: "error", text: error.message || "Erreur lors de la création" });
+        return;
+      }
+      setClubNameInput("");
+      setClubMsg({ type: "success", text: "Club créé !" });
+      router.refresh();
+    } catch {
+      setClubMsg({ type: "error", text: "Erreur réseau, réessaie" });
+    } finally {
+      setClubBusy(false);
+    }
+  };
+
+  const joinClub = async () => {
+    const trimmed = clubCodeInput.trim();
+    if (!trimmed) {
+      setClubMsg({ type: "error", text: "Code d'invitation invalide" });
+      return;
+    }
+    setClubBusy(true);
+    setClubMsg(null);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.rpc("join_club", { p_invite_code: trimmed });
+      if (error) {
+        setClubMsg({ type: "error", text: "Code d'invitation invalide ou erreur réseau" });
+        return;
+      }
+      setClubCodeInput("");
+      setClubMsg({ type: "success", text: "Club rejoint !" });
+      router.refresh();
+    } catch {
+      setClubMsg({ type: "error", text: "Erreur réseau, réessaie" });
+    } finally {
+      setClubBusy(false);
+    }
+  };
+
+  const leaveClub = async (clubId) => {
+    setClubBusy(true);
+    setClubMsg(null);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.from("club_members").delete().eq("club_id", clubId).eq("user_id", userId);
+      if (error) {
+        setClubMsg({ type: "error", text: "Erreur lors du départ du club" });
+        return;
+      }
+      router.refresh();
+    } catch {
+      setClubMsg({ type: "error", text: "Erreur réseau, réessaie" });
+    } finally {
+      setClubBusy(false);
+    }
+  };
+
+  const copyInviteCode = async (code) => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setClubMsg({ type: "success", text: `Code ${code} copié` });
+    } catch {
+      setClubMsg({ type: "error", text: `Copie impossible — code : ${code}` });
     }
   };
 
@@ -505,6 +608,7 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
             { k: "marche", l: "Marché" },
             { k: "portefeuille", l: "Mon portefeuille" },
             { k: "classement", l: "Classement" },
+            { k: "clubs", l: "Clubs" },
           ].map((t) => (
             <button
               key={t.k}
@@ -636,6 +740,290 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
                 })
               )}
             </div>
+          </div>
+        ) : tab === "clubs" ? (
+          <div style={{ maxWidth: 640 }}>
+            {!isLoggedIn ? (
+              <div style={{ textAlign: "center", padding: "60px 20px", color: "#5C6373" }}>
+                Connecte-toi pour créer ou rejoindre un club.
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
+                  <div
+                    style={{
+                      flex: "1 1 260px",
+                      background: "#101319",
+                      border: "1px solid #181C25",
+                      borderRadius: 14,
+                      padding: 18,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#5C6373",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.04em",
+                        marginBottom: 10,
+                      }}
+                    >
+                      Créer un club
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        value={clubNameInput}
+                        onChange={(e) => {
+                          setClubNameInput(e.target.value);
+                          setClubMsg(null);
+                        }}
+                        maxLength={40}
+                        placeholder="Nom du club"
+                        style={{
+                          flex: 1,
+                          background: "#151922",
+                          border: "1px solid #232833",
+                          borderRadius: 10,
+                          padding: "10px 12px",
+                          color: "#EDEEF2",
+                          fontSize: 14,
+                          boxSizing: "border-box",
+                          minWidth: 0,
+                        }}
+                      />
+                      <button
+                        onClick={createClub}
+                        disabled={clubBusy}
+                        style={{
+                          padding: "10px 16px",
+                          borderRadius: 10,
+                          border: "none",
+                          background: "#FFB800",
+                          color: "#0B0E14",
+                          fontWeight: 700,
+                          fontSize: 13.5,
+                          opacity: clubBusy ? 0.6 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        Créer
+                      </button>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      flex: "1 1 260px",
+                      background: "#101319",
+                      border: "1px solid #181C25",
+                      borderRadius: 14,
+                      padding: 18,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "#5C6373",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.04em",
+                        marginBottom: 10,
+                      }}
+                    >
+                      Rejoindre avec un code
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        value={clubCodeInput}
+                        onChange={(e) => {
+                          setClubCodeInput(e.target.value);
+                          setClubMsg(null);
+                        }}
+                        maxLength={8}
+                        placeholder="Code (ex: A1B2C3D4)"
+                        style={{
+                          flex: 1,
+                          background: "#151922",
+                          border: "1px solid #232833",
+                          borderRadius: 10,
+                          padding: "10px 12px",
+                          color: "#EDEEF2",
+                          fontSize: 14,
+                          boxSizing: "border-box",
+                          minWidth: 0,
+                          textTransform: "uppercase",
+                        }}
+                      />
+                      <button
+                        onClick={joinClub}
+                        disabled={clubBusy}
+                        style={{
+                          padding: "10px 16px",
+                          borderRadius: 10,
+                          border: "1px solid #232833",
+                          background: "#151922",
+                          color: "#EDEEF2",
+                          fontWeight: 700,
+                          fontSize: 13.5,
+                          opacity: clubBusy ? 0.6 : 1,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        Rejoindre
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {clubMsg && (
+                  <div
+                    style={{
+                      marginBottom: 16,
+                      fontSize: 12.5,
+                      color: clubMsg.type === "error" ? "#FF8A8A" : "#3DDC84",
+                    }}
+                  >
+                    {clubMsg.text}
+                  </div>
+                )}
+
+                {(myClubs ?? []).length === 0 ? (
+                  <div style={{ textAlign: "center", padding: "40px 20px", color: "#5C6373" }}>
+                    Aucun club pour l&apos;instant. Crées-en un, ou rejoins celui d&apos;un ami avec son code
+                    d&apos;invitation.
+                  </div>
+                ) : (
+                  myClubs.map((club) => {
+                    const rows = (clubLeaderboard ?? []).filter((r) => r.club_id === club.id);
+                    const isExpanded = expandedClubId === club.id;
+                    return (
+                      <div
+                        key={club.id}
+                        style={{
+                          background: "#101319",
+                          border: "1px solid #181C25",
+                          borderRadius: 14,
+                          padding: 18,
+                          marginBottom: 14,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 12,
+                            cursor: "pointer",
+                          }}
+                          onClick={() => setExpandedClubId(isExpanded ? null : club.id)}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 15 }}>{club.name}</div>
+                            <div style={{ fontSize: 12, color: "#5C6373", marginTop: 2 }}>
+                              {club.member_count} membre{club.member_count > 1 ? "s" : ""}
+                              {club.owner_id === userId ? " · toi = créateur" : ""}
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 12, color: "#8A93A6" }}>{isExpanded ? "▲" : "▼"}</div>
+                        </div>
+
+                        {isExpanded && (
+                          <div style={{ marginTop: 16, borderTop: "1px solid #1C212B", paddingTop: 16 }}>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                marginBottom: 14,
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <div style={{ fontSize: 12, color: "#5C6373" }}>
+                                Code d&apos;invitation :{" "}
+                                <span className="kairo-mono" style={{ color: "#FFB800", fontWeight: 700 }}>
+                                  {club.invite_code}
+                                </span>
+                              </div>
+                              <div style={{ display: "flex", gap: 8 }}>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    copyInviteCode(club.invite_code);
+                                  }}
+                                  style={{
+                                    padding: "6px 12px",
+                                    borderRadius: 8,
+                                    border: "1px solid #232833",
+                                    background: "#151922",
+                                    color: "#EDEEF2",
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  Copier le code
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    leaveClub(club.id);
+                                  }}
+                                  disabled={clubBusy}
+                                  style={{
+                                    padding: "6px 12px",
+                                    borderRadius: 8,
+                                    border: "1px solid #4A2226",
+                                    background: "#2A1416",
+                                    color: "#FF8A8A",
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    opacity: clubBusy ? 0.6 : 1,
+                                  }}
+                                >
+                                  Quitter
+                                </button>
+                              </div>
+                            </div>
+
+                            {rows.length === 0 ? (
+                              <div style={{ fontSize: 12.5, color: "#5C6373" }}>Aucun classement pour l&apos;instant.</div>
+                            ) : (
+                              rows.map((row, i) => {
+                                const isMe = row.display_name === pseudoInput;
+                                return (
+                                  <div
+                                    key={i}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 14,
+                                      padding: "10px 4px",
+                                      borderBottom: i < rows.length - 1 ? "1px solid #181C25" : "none",
+                                    }}
+                                  >
+                                    <div
+                                      className="kairo-mono"
+                                      style={{ width: 22, textAlign: "right", color: "#5C6373", fontSize: 12.5, fontWeight: 600 }}
+                                    >
+                                      {i + 1}
+                                    </div>
+                                    <div style={{ flex: 1, fontSize: 13.5, fontWeight: 600, color: isMe ? "#FFB800" : "#EDEEF2" }}>
+                                      {row.display_name}
+                                    </div>
+                                    <div className="kairo-mono" style={{ fontSize: 13.5, fontWeight: 600 }}>
+                                      {Number(row.total_value_kc).toLocaleString("fr-FR", { maximumFractionDigits: 0 })} K¢
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </>
+            )}
           </div>
         ) : (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", gap: 24 }}>

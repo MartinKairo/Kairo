@@ -89,11 +89,18 @@ export default async function Home() {
   // en 010_notifications.sql — voir 014_profiles_and_leaderboard.sql) peut
   // être absente si cette migration n'a pas encore été exécutée -> pseudo
   // par défaut nul, pas de plantage.
-  const [{ data: portfolio }, { data: positionsRows }, { data: profile }] = await Promise.all([
-    supabase.from("portfolio").select("*").eq("user_id", user.id).maybeSingle(),
-    supabase.from("positions").select("*").eq("user_id", user.id),
-    supabase.from("public_profiles").select("display_name").eq("user_id", user.id).maybeSingle(),
-  ]);
+  // my_clubs/club_leaderboard peuvent être absentes si supabase/015_clubs.sql
+  // n'a pas encore été exécutée -> pas de plantage, juste aucun club affiché.
+  // Ces deux vues filtrent déjà sur auth.uid() en interne (voir la migration),
+  // donc ce select ne renvoie que les clubs de l'utilisateur connecté.
+  const [{ data: portfolio }, { data: positionsRows }, { data: profile }, { data: myClubsRows }, { data: clubLeaderboardRows }] =
+    await Promise.all([
+      supabase.from("portfolio").select("*").eq("user_id", user.id).maybeSingle(),
+      supabase.from("positions").select("*").eq("user_id", user.id),
+      supabase.from("public_profiles").select("display_name").eq("user_id", user.id).maybeSingle(),
+      supabase.from("my_clubs").select("*"),
+      supabase.from("club_leaderboard").select("*"),
+    ]);
 
   const initialCash = portfolio?.cash ?? STARTING_CASH;
   const initialPositions = Object.fromEntries(
@@ -111,6 +118,8 @@ export default async function Home() {
       userId={user.id}
       displayName={profile?.display_name ?? null}
       leaderboard={leaderboardRows ?? []}
+      myClubs={myClubsRows ?? []}
+      clubLeaderboard={clubLeaderboardRows ?? []}
     />
   );
 }
