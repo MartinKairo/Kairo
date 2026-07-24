@@ -1069,12 +1069,10 @@ export default function KairoApp({
                     <div className="kairo-mono" style={{ fontWeight: 600, fontSize: 15 }}>
                       {formatKc(s.currentPostMoneyEur)}
                     </div>
-                    {held ? (
+                    {held && (
                       <div className="kairo-mono" style={{ fontSize: 12, color: "#FFB800" }}>
                         {formatPct(held.equityPct)} détenu
                       </div>
-                    ) : (
-                      <div style={{ fontSize: 11, color: "#5C6373" }}>momentum {momentum}</div>
                     )}
                   </div>
                 </div>
@@ -1289,11 +1287,11 @@ export default function KairoApp({
                 Signaux momentum (informatif — n&apos;influence pas la valorisation)
               </div>
               {[
-                { l: "Levées / funding (40%)", v: selected.signal_funding },
-                { l: "Tendance de recherche (20%)", v: selected.signal_trends },
-                { l: "Mentions presse (20%)", v: selected.signal_press },
+                { l: "Levées / funding", v: selected.signal_funding },
+                { l: "Tendance de recherche", v: selected.signal_trends },
+                { l: "Mentions presse", v: selected.signal_press },
                 ...(selected.signal_github !== null && selected.signal_github !== undefined
-                  ? [{ l: "Activité GitHub (bonus, +20 pts max)", v: selected.signal_github, icon: true }]
+                  ? [{ l: "Activité GitHub", v: selected.signal_github, icon: true }]
                   : []),
               ].map((row, i) => (
                 <div key={i} style={{ marginBottom: 10 }}>
