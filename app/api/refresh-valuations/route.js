@@ -315,6 +315,15 @@ export async function GET(request) {
         marketNoise,
       });
 
+      // Variation du jour de la valorisation AFFICHÉE (pas du score momentum),
+      // pour la flèche hausse/baisse/stable + % à côté de chaque startup côté
+      // frontend (voir supabase/021_daily_change_pct.sql). L'ancre ne bouge
+      // pas dans cette phase (elle ne bouge que sur une vraie levée détectée,
+      // Phase 1), donc la variation de currentPostMoneyEur entre avant/après
+      // ce passage du cron se réduit à ce ratio, sans avoir besoin de relire
+      // l'ancre ici.
+      const dailyChangePct = (newOffsetPct - oldOffsetPct) / (1 + oldOffsetPct);
+
       // Signal GitHub (voir lib/scoring/sources/github.js et
       // supabase/020_new_signal_backed_roster.sql — toutes les startups
       // actives ont désormais un github_org réel) : recalculé chaque jour ici
@@ -345,6 +354,7 @@ export async function GET(request) {
         .update({
           valuation_offset_pct: newOffsetPct,
           momentum_regime: newRegime,
+          daily_change_pct: dailyChangePct,
           signal_github: signalGithub,
           score: newScore,
           delta,
@@ -379,6 +389,7 @@ export async function GET(request) {
         market_noise_pct: marketNoise,
         old_offset_pct: oldOffsetPct,
         new_offset_pct: newOffsetPct,
+        daily_change_pct: dailyChangePct,
         signal_github: signalGithub,
         score: newScore,
         delta,

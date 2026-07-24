@@ -46,6 +46,9 @@ const TrendingDown = (p) => (
     }
   />
 );
+const Minus = (p) => (
+  <Icon {...p} path={<line x1="5" y1="12" x2="19" y2="12" />} />
+);
 const Flame = (p) => (
   <Icon
     {...p}
@@ -149,6 +152,26 @@ function StageBadge({ stage }) {
     >
       {STAGE_LABELS[stage] || stage}
     </span>
+  );
+}
+
+// Flèche hausse/baisse/stable + % de variation de la valorisation depuis le
+// dernier passage du cron (voir dailyChangePct dans app/page.js et
+// supabase/021_daily_change_pct.sql). En dessous de 0,05 % on considère que
+// c'est stable (évite d'afficher une flèche pour un arrondi flottant).
+function ValuationChange({ pct, size = 12 }) {
+  const value = Number(pct ?? 0);
+  const isFlat = Math.abs(value) < 0.0005;
+  const isUp = value > 0;
+  const color = isFlat ? "#5C6373" : isUp ? "#3DDC84" : "#FF5C5C";
+  return (
+    <div
+      className="kairo-mono"
+      style={{ display: "inline-flex", alignItems: "center", gap: 3, color, fontSize: size, fontWeight: 600 }}
+    >
+      {isFlat ? <Minus size={size} /> : isUp ? <TrendingUp size={size} /> : <TrendingDown size={size} />}
+      {isFlat ? "0,0 %" : `${isUp ? "+" : ""}${formatPct(value, 1)}`}
+    </div>
   );
 }
 
@@ -1038,6 +1061,11 @@ export default function KairoApp({
                     <div className="kairo-mono" style={{ fontWeight: 600, fontSize: 15 }}>
                       {formatKc(s.currentPostMoneyEur)}
                     </div>
+                    {s.currentPostMoneyEur !== null && (
+                      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 2 }}>
+                        <ValuationChange pct={s.dailyChangePct} />
+                      </div>
+                    )}
                     {held && (
                       <div className="kairo-mono" style={{ fontSize: 12, color: "#FFB800" }}>
                         {formatPct(held.equityPct)} détenu
@@ -1113,6 +1141,11 @@ export default function KairoApp({
                     <div className="kairo-mono" style={{ fontSize: 17, fontWeight: 700 }}>
                       {formatKc(selectedValuation)}
                     </div>
+                    {selectedValuation !== null && (
+                      <div style={{ marginTop: 3 }}>
+                        <ValuationChange pct={selected.dailyChangePct} size={12.5} />
+                      </div>
+                    )}
                   </div>
                   {selected.lastRoundDate && (
                     <div style={{ textAlign: "right", fontSize: 11.5, color: "#5C6373" }}>

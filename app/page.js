@@ -60,6 +60,11 @@ export default async function Home() {
         currentPostMoneyEur,
         anchorPostMoneyEur: anchorEur,
         valuationOffsetPct: offsetPct,
+        // Variation de la valorisation affichée depuis le dernier passage du
+        // cron (voir supabase/021_daily_change_pct.sql et
+        // app/api/refresh-valuations/route.js) — utilisé pour la flèche
+        // hausse/baisse/stable + % à côté de chaque startup.
+        dailyChangePct: Number(s.daily_change_pct ?? 0),
         lastRoundDate: v?.last_round_date ?? null,
       };
     })
