@@ -24,7 +24,12 @@
 import { supabase } from "@/lib/supabaseClient";
 import { fetchValuationFeeds, findValuationSignals } from "@/lib/scoring/sources/valuation";
 import { getDailySentiment } from "@/lib/scoring/sources/sentiment";
-import { computeNextOffset, MOMENTUM_CONSTANTS } from "@/lib/scoring/sources/momentum";
+import {
+  computeNextOffset,
+  nextMomentumRegime,
+  computeMarketNoise,
+  MOMENTUM_CONSTANTS,
+} from "@/lib/scoring/sources/momentum";
 import { notifyPositionHolders } from "@/lib/notify/valuationChangeNotifier";
 
 // Écart de valuation_offset_pct (voir momentum.js) à partir duquel un
@@ -274,6 +279,17 @@ export async function GET(request) {
         continue;
       }
 
+      // Régime persistant (croissance/stagnation/décroissance, voir
+      // supabase/018_market_noise.sql) + bruit de marché du jour qui en
+      // découle — garantit un mouvement même sans aucun signal presse
+      // détecté aujourd'hui (voir lib/scoring/sources/momentum.js).
+      const newRegime = nextMomentumRegime({
+        startupId: startup.id,
+        dateStr: today,
+        currentRegime: startup.momentum_regime,
+      });
+      const marketNoise = computeMarketNoise({ startupId: startup.id, dateStr: today, regime: newRegime });
+
       const oldOffsetPct = Number(startup.valuation_offset_pct ?? 0);
       const { newOffsetPct } = computeNextOffset({
         oldOffsetPct,
@@ -288,11 +304,12 @@ export async function GET(request) {
         recentHistoryWithToday: (recentHistoryRaw ?? []).map((h) => ({
           sentimentScore: h.sentiment_score === null ? null : Number(h.sentiment_score),
         })),
+        marketNoise,
       });
 
       const { error: updateError } = await supabase
         .from("startups")
-        .update({ valuation_offset_pct: newOffsetPct })
+        .update({ valuation_offset_pct: newOffsetPct, momentum_regime: newRegime })
         .eq("id", startup.id);
 
       if (updateError) {
@@ -318,6 +335,8 @@ export async function GET(request) {
         ok: true,
         mentions_today: todaySignal.mentionsCount,
         sentiment_today: todaySignal.sentimentScore,
+        regime: newRegime,
+        market_noise_pct: marketNoise,
         old_offset_pct: oldOffsetPct,
         new_offset_pct: newOffsetPct,
         notified,
