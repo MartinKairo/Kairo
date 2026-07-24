@@ -25,6 +25,8 @@ import { supabase } from "@/lib/supabaseClient";
 import { fetchValuationFeeds, findValuationSignals } from "@/lib/scoring/sources/valuation";
 import { getDailySentiment } from "@/lib/scoring/sources/sentiment";
 import { getFundingScore } from "@/lib/scoring/sources/funding";
+import { getGithubScore } from "@/lib/scoring/sources/github";
+import { computeMomentumScore } from "@/lib/scoring/config";
 import {
   computeNextOffset,
   deriveMomentumRegime,
@@ -313,9 +315,40 @@ export async function GET(request) {
         marketNoise,
       });
 
+      // Signal GitHub (voir lib/scoring/sources/github.js et
+      // supabase/020_new_signal_backed_roster.sql — toutes les startups
+      // actives ont désormais un github_org réel) : recalculé chaque jour ici
+      // plutôt que via la seule route manuelle /api/refresh-github, pour que
+      // le score bouge automatiquement pour toutes les boîtes sans ajouter de
+      // second cron (contrainte Vercel Hobby : 1 déclenchement/jour, voir
+      // vercel.json). applicable==="error" garde la dernière valeur connue
+      // (une panne d'API GitHub ne doit pas être interprétée comme une
+      // absence de signal).
+      const github = await getGithubScore(startup.github_org);
+      const signalGithub =
+        github.applicable === true
+          ? github.score
+          : github.applicable === "error"
+            ? startup.signal_github
+            : null;
+
+      const newScore = computeMomentumScore({
+        funding: startup.signal_funding,
+        trends: startup.signal_trends,
+        press: startup.signal_press,
+        github: signalGithub,
+      });
+      const delta = Math.round((newScore - startup.score) * 10) / 10;
+
       const { error: updateError } = await supabase
         .from("startups")
-        .update({ valuation_offset_pct: newOffsetPct, momentum_regime: newRegime })
+        .update({
+          valuation_offset_pct: newOffsetPct,
+          momentum_regime: newRegime,
+          signal_github: signalGithub,
+          score: newScore,
+          delta,
+        })
         .eq("id", startup.id);
 
       if (updateError) {
@@ -346,6 +379,9 @@ export async function GET(request) {
         market_noise_pct: marketNoise,
         old_offset_pct: oldOffsetPct,
         new_offset_pct: newOffsetPct,
+        signal_github: signalGithub,
+        score: newScore,
+        delta,
         notified,
       });
     }
