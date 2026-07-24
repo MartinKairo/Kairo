@@ -206,11 +206,13 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
   const [query, setQuery] = useState("");
   const [amountKc, setAmountKc] = useState("");
 
-  // Pseudo public (table profiles, voir supabase/014_profiles_and_leaderboard.sql) :
-  // édité directement depuis le navigateur via le client Supabase authentifié,
-  // la policy RLS "Chacun modifie son propre pseudo" garantit qu'on ne peut
-  // écrire que sa propre ligne (filtrée par user_id ici en plus, par sécurité
-  // défensive côté client).
+  // Pseudo public (table public_profiles, distincte de la table privée
+  // "profiles" utilisée pour les emails en 010_notifications.sql — voir
+  // supabase/014_profiles_and_leaderboard.sql) : édité directement depuis le
+  // navigateur via le client Supabase authentifié, la policy RLS "Chacun
+  // modifie son propre pseudo" garantit qu'on ne peut écrire que sa propre
+  // ligne (filtrée par user_id ici en plus, par sécurité défensive côté
+  // client).
   const [pseudoInput, setPseudoInput] = useState(displayName || "");
   const [pseudoSaving, setPseudoSaving] = useState(false);
   const [pseudoMsg, setPseudoMsg] = useState(null);
@@ -226,7 +228,7 @@ export default function KairoApp({ startups, initialCash, initialPositions, user
     try {
       const supabase = createClient();
       const { error } = await supabase
-        .from("profiles")
+        .from("public_profiles")
         .update({ display_name: trimmed, updated_at: new Date().toISOString() })
         .eq("user_id", userId);
       if (error) {

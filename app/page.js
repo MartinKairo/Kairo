@@ -85,12 +85,14 @@ export default async function Home() {
   // portfolio/positions peuvent être absents si supabase/006_user_accounts.sql
   // ou 007_equity_model.sql n'ont pas encore été exécutés -> on retombe sur un
   // portefeuille par défaut plutôt que de faire planter la page.
-  // profiles peut être absent si supabase/014_profiles_and_leaderboard.sql
-  // n'a pas encore été exécutée -> pseudo par défaut nul, pas de plantage.
+  // public_profiles (pseudo public, distincte de la table privée "profiles"
+  // en 010_notifications.sql — voir 014_profiles_and_leaderboard.sql) peut
+  // être absente si cette migration n'a pas encore été exécutée -> pseudo
+  // par défaut nul, pas de plantage.
   const [{ data: portfolio }, { data: positionsRows }, { data: profile }] = await Promise.all([
     supabase.from("portfolio").select("*").eq("user_id", user.id).maybeSingle(),
     supabase.from("positions").select("*").eq("user_id", user.id),
-    supabase.from("profiles").select("display_name").eq("user_id", user.id).maybeSingle(),
+    supabase.from("public_profiles").select("display_name").eq("user_id", user.id).maybeSingle(),
   ]);
 
   const initialCash = portfolio?.cash ?? STARTING_CASH;
