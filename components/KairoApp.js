@@ -125,7 +125,11 @@ function StartupLogo({ startup, size = 40 }) {
       {!failed ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={`https://logo.clearbit.com/${startup.website_domain}`}
+          // logo.clearbit.com (ex-service gratuit) a été décommissionné par
+          // Clearbit/HubSpot (DNS ne résout plus) -> remplacé par unavatar.io,
+          // même principe (URL basée sur le domaine, sans clé API), qui
+          // agrège plusieurs sources de logos avec son propre fallback interne.
+          src={`https://unavatar.io/${startup.website_domain}`}
           alt={startup.name}
           width={size}
           height={size}
