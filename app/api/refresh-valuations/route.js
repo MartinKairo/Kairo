@@ -325,6 +325,14 @@ export async function GET(request) {
     }
   }
 
+  // --- Phase 3 : instantané quotidien du portefeuille de chaque utilisateur
+  // (voir supabase/016_portfolio_snapshots.sql) — prérequis pour un futur
+  // classement "du mois"/"de la semaine". Un seul appel RPC (upsert group by
+  // utilisateur côté SQL), pas de boucle JS par utilisateur nécessaire.
+  const { data: snapshotCount, error: snapshotError } = await supabase.rpc(
+    "capture_portfolio_snapshots"
+  );
+
   return Response.json({
     examined: results.length,
     applied: results.filter((r) => r.applied).length,
@@ -336,5 +344,6 @@ export async function GET(request) {
       notable_moves: momentumResults.filter((r) => (r.notified ?? 0) > 0).length,
       results: momentumResults,
     },
+    snapshots: snapshotError ? { ok: false, error: snapshotError.message } : { ok: true, count: snapshotCount },
   });
 }
