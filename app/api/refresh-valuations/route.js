@@ -24,9 +24,10 @@
 import { supabase } from "@/lib/supabaseClient";
 import { fetchValuationFeeds, findValuationSignals } from "@/lib/scoring/sources/valuation";
 import { getDailySentiment } from "@/lib/scoring/sources/sentiment";
+import { getFundingScore } from "@/lib/scoring/sources/funding";
 import {
   computeNextOffset,
-  nextMomentumRegime,
+  deriveMomentumRegime,
   computeMarketNoise,
   MOMENTUM_CONSTANTS,
 } from "@/lib/scoring/sources/momentum";
@@ -280,13 +281,18 @@ export async function GET(request) {
       }
 
       // Régime persistant (croissance/stagnation/décroissance, voir
-      // supabase/018_market_noise.sql) + bruit de marché du jour qui en
-      // découle — garantit un mouvement même sans aucun signal presse
-      // détecté aujourd'hui (voir lib/scoring/sources/momentum.js).
-      const newRegime = nextMomentumRegime({
-        startupId: startup.id,
-        dateStr: today,
+      // supabase/018_market_noise.sql), déduit de vraies données du jour
+      // (levée détectée dans la presse + ton des articles — voir
+      // deriveMomentumRegime dans momentum.js) plutôt que tiré au hasard.
+      // fundingScoreToday réutilise les flux RSS déjà récupérés plus haut
+      // (feeds), aucun appel réseau supplémentaire.
+      const fundingToday = getFundingScore(startup.name, feeds);
+      const fundingScoreToday = fundingToday.ok ? fundingToday.score : 0;
+
+      const newRegime = deriveMomentumRegime({
         currentRegime: startup.momentum_regime,
+        fundingScoreToday,
+        sentimentToday: todaySignal.sentimentScore,
       });
       const marketNoise = computeMarketNoise({ startupId: startup.id, dateStr: today, regime: newRegime });
 
@@ -335,6 +341,7 @@ export async function GET(request) {
         ok: true,
         mentions_today: todaySignal.mentionsCount,
         sentiment_today: todaySignal.sentimentScore,
+        funding_score_today: fundingScoreToday,
         regime: newRegime,
         market_noise_pct: marketNoise,
         old_offset_pct: oldOffsetPct,
