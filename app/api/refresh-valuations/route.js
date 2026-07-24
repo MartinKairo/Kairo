@@ -23,16 +23,9 @@
 
 import { supabase } from "@/lib/supabaseClient";
 import { fetchValuationFeeds, findValuationSignals } from "@/lib/scoring/sources/valuation";
-import { getDailySentiment } from "@/lib/scoring/sources/sentiment";
-import { getFundingScore } from "@/lib/scoring/sources/funding";
 import { getGithubScore } from "@/lib/scoring/sources/github";
 import { computeMomentumScore } from "@/lib/scoring/config";
-import {
-  computeNextOffset,
-  deriveMomentumRegime,
-  computeMarketNoise,
-  MOMENTUM_CONSTANTS,
-} from "@/lib/scoring/sources/momentum";
+import { composeOffset, deriveGithubRegime, computeMarketNoise } from "@/lib/scoring/sources/momentum";
 import { notifyPositionHolders } from "@/lib/notify/valuationChangeNotifier";
 
 // Écart de valuation_offset_pct (voir momentum.js) à partir duquel un
@@ -208,13 +201,18 @@ export async function GET(request) {
     }
   }
 
-  // --- Phase 2 : tendance + buzz (voir supabase/011_relative_valuation.sql
-  // et lib/scoring/sources/momentum.js) ---
-  // Fait osciller valuation_offset_pct de CHAQUE startup, une fois par jour
+  // --- Phase 2 : mouvement quotidien de valorisation (voir
+  // lib/scoring/sources/momentum.js) ---
+  // Fait bouger valuation_offset_pct de CHAQUE startup, une fois par jour
   // (contrainte Vercel Cron Hobby : 1 déclenchement/jour max — voir
   // vercel.json), indépendamment de la Phase 1 ci-dessus (qui ne bouge
-  // l'ANCRE que sur une vraie levée détectée, un événement rare). Réutilise
-  // les mêmes flux RSS déjà récupérés (feeds), pas de second fetch.
+  // l'ANCRE que sur une vraie levée détectée, un événement rare). Signal
+  // commun aux 31 startups actives : leur score GitHub (voir
+  // supabase/020_new_signal_backed_roster.sql, github_org réel garanti pour
+  // chacune) — pas la presse, qui ne couvre qu'une poignée de startups par
+  // jour (voir échange du 2026-07-24). Composition multiplicative, sans
+  // amortissement ni plafond artificiel (voir momentum.js pour le détail du
+  // raisonnement).
   const today = new Date().toISOString().slice(0, 10);
   const { data: valuations, error: valuationsError } = await supabase
     .from("startup_valuations")
@@ -231,108 +229,17 @@ export async function GET(request) {
 
     for (const startup of startups) {
       const anchorEur = anchorByStartup[startup.id] ?? null;
-      // Pas d'ancre connue (aucun tour enregistré) -> rien à faire osciller,
+      // Pas d'ancre connue (aucun tour enregistré) -> rien à faire bouger,
       // cohérent avec le tri de app/page.js qui met ces startups en dernier.
       if (!anchorEur || anchorEur <= 0) continue;
 
-      const todaySignal = getDailySentiment(startup.name, feeds);
-
-      // Journalise le signal du jour AVANT de lire l'historique pour le
-      // buzz : on veut comparer aujourd'hui à ce qui précède, jamais à
-      // lui-même. On upsert quand même en premier (idempotent, clé unique
-      // startup_id+observed_date) car un ré-appel le même jour doit écraser
-      // la valeur du jour, pas la dupliquer.
-      const { data: priorHistory, error: priorError } = await supabase
-        .from("signal_history")
-        .select("mentions_count, sentiment_score")
-        .eq("startup_id", startup.id)
-        .lt("observed_date", today)
-        .order("observed_date", { ascending: false })
-        .limit(30);
-
-      const { error: upsertError } = await supabase.from("signal_history").upsert(
-        {
-          startup_id: startup.id,
-          observed_date: today,
-          mentions_count: todaySignal.mentionsCount,
-          sentiment_score: todaySignal.sentimentScore,
-        },
-        { onConflict: "startup_id,observed_date" }
-      );
-
-      if (priorError || upsertError) {
-        momentumResults.push({
-          startup: startup.name,
-          ok: false,
-          error: priorError?.message ?? upsertError?.message,
-        });
-        continue;
-      }
-
-      const { data: recentHistoryRaw, error: recentError } = await supabase
-        .from("signal_history")
-        .select("sentiment_score")
-        .eq("startup_id", startup.id)
-        .lte("observed_date", today)
-        .order("observed_date", { ascending: false })
-        .limit(MOMENTUM_CONSTANTS.TREND_WINDOW_DAYS);
-
-      if (recentError) {
-        momentumResults.push({ startup: startup.name, ok: false, error: recentError.message });
-        continue;
-      }
-
-      // Régime persistant (croissance/stagnation/décroissance, voir
-      // supabase/018_market_noise.sql), déduit de vraies données du jour
-      // (levée détectée dans la presse + ton des articles — voir
-      // deriveMomentumRegime dans momentum.js) plutôt que tiré au hasard.
-      // fundingScoreToday réutilise les flux RSS déjà récupérés plus haut
-      // (feeds), aucun appel réseau supplémentaire.
-      const fundingToday = getFundingScore(startup.name, feeds);
-      const fundingScoreToday = fundingToday.ok ? fundingToday.score : 0;
-
-      const newRegime = deriveMomentumRegime({
-        currentRegime: startup.momentum_regime,
-        fundingScoreToday,
-        sentimentToday: todaySignal.sentimentScore,
-      });
-      const marketNoise = computeMarketNoise({ startupId: startup.id, dateStr: today, regime: newRegime });
-
-      const oldOffsetPct = Number(startup.valuation_offset_pct ?? 0);
-      const { newOffsetPct } = computeNextOffset({
-        oldOffsetPct,
-        today: {
-          mentionsCount: todaySignal.mentionsCount,
-          sentimentScore: todaySignal.sentimentScore,
-        },
-        priorHistory: (priorHistory ?? []).map((h) => ({
-          mentionsCount: h.mentions_count,
-          sentimentScore: h.sentiment_score === null ? null : Number(h.sentiment_score),
-        })),
-        recentHistoryWithToday: (recentHistoryRaw ?? []).map((h) => ({
-          sentimentScore: h.sentiment_score === null ? null : Number(h.sentiment_score),
-        })),
-        marketNoise,
-      });
-
-      // Variation du jour de la valorisation AFFICHÉE (pas du score momentum),
-      // pour la flèche hausse/baisse/stable + % à côté de chaque startup côté
-      // frontend (voir supabase/021_daily_change_pct.sql). L'ancre ne bouge
-      // pas dans cette phase (elle ne bouge que sur une vraie levée détectée,
-      // Phase 1), donc la variation de currentPostMoneyEur entre avant/après
-      // ce passage du cron se réduit à ce ratio, sans avoir besoin de relire
-      // l'ancre ici.
-      const dailyChangePct = (newOffsetPct - oldOffsetPct) / (1 + oldOffsetPct);
-
-      // Signal GitHub (voir lib/scoring/sources/github.js et
-      // supabase/020_new_signal_backed_roster.sql — toutes les startups
-      // actives ont désormais un github_org réel) : recalculé chaque jour ici
-      // plutôt que via la seule route manuelle /api/refresh-github, pour que
-      // le score bouge automatiquement pour toutes les boîtes sans ajouter de
-      // second cron (contrainte Vercel Hobby : 1 déclenchement/jour, voir
-      // vercel.json). applicable==="error" garde la dernière valeur connue
-      // (une panne d'API GitHub ne doit pas être interprétée comme une
-      // absence de signal).
+      // Signal GitHub (voir lib/scoring/sources/github.js) : recalculé
+      // chaque jour ici plutôt que via la seule route manuelle
+      // /api/refresh-github, pour que le signal bouge automatiquement pour
+      // toutes les boîtes sans ajouter de second cron (contrainte Vercel
+      // Hobby : 1 déclenchement/jour, voir vercel.json). applicable==="error"
+      // garde la dernière valeur connue (une panne d'API GitHub ne doit pas
+      // être interprétée comme une absence de signal).
       const github = await getGithubScore(startup.github_org);
       const signalGithub =
         github.applicable === true
@@ -340,6 +247,22 @@ export async function GET(request) {
           : github.applicable === "error"
             ? startup.signal_github
             : null;
+
+      // Tendance déduite du signal GitHub du jour (ascendant/descendant/
+      // neutre), amplitude tirée aléatoirement (déterministe par seed) dans
+      // la fourchette du régime — voir momentum.js.
+      const newRegime = deriveGithubRegime({ currentRegime: startup.momentum_regime, signalGithub });
+      const dailyReturn = computeMarketNoise({ startupId: startup.id, dateStr: today, regime: newRegime });
+
+      const oldOffsetPct = Number(startup.valuation_offset_pct ?? 0);
+      const newOffsetPct = composeOffset({ oldOffsetPct, dailyReturn });
+
+      // Variation du jour de la valorisation AFFICHÉE (pas du score
+      // momentum), pour la flèche hausse/baisse/stable + % à côté de chaque
+      // startup côté frontend (voir supabase/021_daily_change_pct.sql).
+      // Sous ce modèle par composition, c'est exactement dailyReturn (pas
+      // besoin de comparer old/new offset, ni de relire l'ancre ici).
+      const dailyChangePct = dailyReturn;
 
       const newScore = computeMomentumScore({
         funding: startup.signal_funding,
@@ -382,11 +305,8 @@ export async function GET(request) {
       momentumResults.push({
         startup: startup.name,
         ok: true,
-        mentions_today: todaySignal.mentionsCount,
-        sentiment_today: todaySignal.sentimentScore,
-        funding_score_today: fundingScoreToday,
         regime: newRegime,
-        market_noise_pct: marketNoise,
+        daily_return_pct: dailyReturn,
         old_offset_pct: oldOffsetPct,
         new_offset_pct: newOffsetPct,
         daily_change_pct: dailyChangePct,
